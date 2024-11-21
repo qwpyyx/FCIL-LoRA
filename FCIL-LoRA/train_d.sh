@@ -1,0 +1,5 @@
+python3 federated_main.py --model=PILoRA_beta_0.5 --dataset=cifar100 --iid=0 --centers_lr=2e-3 --encoders_lr=1e-5 --epochs=30 --gpu 1 --task_num 9 --fg_nc 10 --total_classes 100 --num_users 30 --client_local 10 --niid_type D --beta 0.5 --local_bs=64
+python3 federated_main.py --model=PILoRA_beta_0.1 --dataset=cifar100 --iid=0 --centers_lr=2e-3 --encoders_lr=1e-5 --epochs=30 --gpu 1 --task_num 9 --fg_nc 10 --total_classes 100 --num_users 30 --client_local 10 --niid_type D --beta 0.1 --local_bs=64
+python3 federated_main.py --model=PILoRA_beta_0.05 --dataset=cifar100 --iid=0 --centers_lr=2e-3 --encoders_lr=1e-5 --epochs=30 --gpu 1 --task_num 9 --fg_nc 10 --total_classes 100 --num_users 30 --client_local 10 --niid_type D --beta 0.05 --local_bs=64
+
+python3 federated_main.py --model=FCILLoRA_beta_0.1 --dataset=banking77 --iid=0 --centers_lr=1e-3 --encoders_lr=1e-3 --epochs=5 --gpu 3 --task_num 6 --fg_nc 11 --total_classes 77 --local_ep 3 --num_users 30 --client_local 10 --niid_type D --beta 0.1 --local_bs=32
