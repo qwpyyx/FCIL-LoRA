@@ -1,32 +1,17 @@
-import torch
-import copy
 import shutil
-import torch.nn as nn
-import torch.optim as optim
-import math
-from torchvision import transforms
-from torch.nn import functional as F
-from torch.utils.data import DataLoader, Dataset
-from torch.optim.lr_scheduler import StepLR
-from torch.autograd import Variable
 import os
-import sys
-import numpy as np
 from VLT import *
 from utils import *
 from update import *
 from tqdm import tqdm
-from iCIFAR100 import iCIFAR100
 from CPN import *
-# from t_sneplot import *
-
 from transformers import DataCollatorWithPadding
 from datasets import load_dataset
-from torch.utils.data import default_collate
 
 class vitlora:
     def __init__(self, args, file_name, model, task_size, device):
         # 数据集路径设置为新的banking77数据集路径
+        self.all_tasks_completed = None
         self.data_dir = '/home/qiuwenqi/LLM/Datasets/banking77'  # 假设数据集文件已经上传到此路径
         self.file_name = file_name
         self.args = args
@@ -36,7 +21,11 @@ class vitlora:
         self.task_size = task_size
         self.device = device
 
-        # 加载全局模型，替换为 LLMWithLoRA
+
+        self.task_accuracies = []  # 保存每个任务结束后的最佳准确率
+        self.previous_task_accuracies = []  # 保存每次任务开始前对所有已学任务的准确率
+        self.list_of_individual_testloader = []  # 保存每个任务的独立测试集加载器
+
         self.global_model = model
 
         # 加载banking77数据集，并确保正确映射输入和标签
@@ -57,11 +46,6 @@ class vitlora:
 
         # 数据转换
         self.data_collator = DataCollatorWithPadding(tokenizer=self.global_model.tokenizer)
-
-        # 数据加载器
-        # self.train_loader = torch.utils.data.DataLoader(self.train_set, batch_size=args.local_bs, shuffle=True, collate_fn=self.data_collator)
-        # self.valid_loader = torch.utils.data.DataLoader(self.valid_set, batch_size=args.local_bs, shuffle=False, collate_fn=self.data_collator)
-        # self.test_loader = torch.utils.data.DataLoader(self.test_set, batch_size=args.local_bs, shuffle=False, collate_fn=self.data_collator)
 
         self.classes = None
         self.old_model = None
@@ -152,64 +136,6 @@ class vitlora:
 
         return mapped_labels
 
-    # def map_new_class_index(self, y, order):
-    #     return np.array(list(map(lambda x: order.index(x), y)))
-
-    # def setup_data(self, shuffle, seed):
-    #     train_targets = self.train_set.targets
-    #     test_targets = self.test_set.targets
-    #     # 创建一个从 0 到类别数（不包括）的整数列表，用于对训练集的类别进行有序标记
-    #     order = [i for i in range(len(np.unique(train_targets)))]
-    #     if shuffle:
-    #         np.random.seed(seed)
-    #         # 扰动
-    #         order = np.random.permutation(len(order)).tolist()
-    #     else:
-    #         order = range(len(order))
-    #     self.class_order = order
-    #     if seed == 0:
-    #         self.class_order = [i for i in range(len(np.unique(train_targets)))]
-    #     print(100*'#')
-    #     # print(self.class_order)
-    #
-    #     self.class_mask = build_continual_dataset(self.args, self.class_order)
-    #     print(self.class_mask)
-    #
-    #     self.train_set.targets = self.map_new_class_index(train_targets, self.class_order)
-    #     self.test_set.targets = self.map_new_class_index(test_targets, self.class_order)
-
-    # def setup_data(self, shuffle):
-    #     # 获取训练集和测试集的类别标签
-    #     train_targets = self.train_set['label']
-    #     test_targets = self.test_set['label']
-    #
-    #     # 获取训练集和测试集中的所有唯一标签，确保包含所有类别
-    #     unique_classes = list(set(train_targets + test_targets))
-    #     unique_classes.sort()  # 这里确保标签按字典序排序
-    #
-    #     # 创建类别的顺序 (直接使用唯一标签，而不是整数)
-    #     if shuffle:
-    #         np.random.seed(self.args.seed)
-    #         class_order = np.random.permutation(unique_classes).tolist()  # 打乱后的标签顺序
-    #     else:
-    #         class_order = unique_classes  # 保持默认的排序顺序
-    #
-    #     self.class_order = class_order
-    #     print(100 * '#')
-    #     print(f'Class Order: {self.class_order}')
-    #
-    #     # 生成每个任务的类别掩码
-    #     self.class_mask = build_continual_dataset(self.args, self.class_order)
-    #     print(f'Class Mask: {self.class_mask}')
-    #
-    #     # 映射类别标签到新的类别顺序上
-    #     train_mapped_targets = self.map_new_class_index(train_targets, self.class_order)
-    #     test_mapped_targets = self.map_new_class_index(test_targets, self.class_order)
-    #
-    #     # 更新数据集的标签,从文本变成序号
-    #     self.train_set = self.train_set.map(lambda example, idx: {'label': train_mapped_targets[idx]},
-    #                                         with_indices=True)
-    #     self.test_set = self.test_set.map(lambda example, idx: {'label': test_mapped_targets[idx]}, with_indices=True)
     def setup_data(self, shuffle):
         # 获取训练集和测试集的类别标签
         train_targets = self.train_set['label']
@@ -243,24 +169,30 @@ class vitlora:
 
     def beforeTrain(self, current_task):
 
-        # # 根据任务设置类别范围
-        # if current_task == 0:
-        #     self.classes = [0, self.numclass]
-        # else:
-        #     self.classes = [self.numclass - self.task_size, self.numclass]
+        # 获取训练前的基线准确率
+        if current_task > 0:
+            previous_acc = []
+            for i, test_loader in enumerate(self.list_of_individual_testloader):
+                acc, _ = self.inference(self.global_model, test_loader)
+                previous_acc.append(acc)
+            self.previous_task_accuracies.append(previous_acc)
 
         if current_task == 0:
             self.classes = [0, min(self.numclass, self.total_classes)]
         else:
-            self.classes = [0, min(self.numclass + current_task * self.task_size, self.total_classes)]
+            # self.classes = [0, min(self.numclass + current_task * self.task_size, self.total_classes)]
             # self.classes = [self.numclass, min(self.numclass + self.task_size, self.total_classes)]
+            self.classes = [0, min((current_task + 1) * self.task_size, self.total_classes)]
+
+        print("Now is training task {}, and self.classes is {}.".format(current_task, self.classes))
 
         if self.classes[1] > self.total_classes:
             self.classes[1] = self.total_classes
 
         if self.classes[0] >= self.total_classes:
             print("All tasks completed. Stopping training.")
-            exit()
+            self.all_tasks_completed = True  # 标志任务已经全部完成
+            return
 
         # 筛选当前任务相关的样本
         self.test_set = self.preprocessed_test_set.filter(lambda example: self.classes[0] <= example['label'] < self.classes[1])
@@ -273,59 +205,24 @@ class vitlora:
         )
         self.list_of_testloader.append(self.test_loader)
 
-        # 切换模型为训练模式并加载到设备
+        # 增加新的任务独立测试集加载器
+        # 为当前任务创建独立的测试集加载器，仅包含当前任务的类别
+        start_class = current_task * self.task_size
+        end_class = min((current_task + 1) * self.task_size, self.total_classes)
+        print(f"Creating individual test loader for task {current_task} with classes {start_class} to {end_class}.")
+
+        current_test_set = self.preprocessed_test_set.filter(
+            lambda example: start_class <= example['label'] < end_class)
+        test_dataset = DatasetSplit(current_test_set, list(range(len(current_test_set))))
+        individual_test_loader = DataLoader(
+            test_dataset, batch_size=self.args.local_bs, shuffle=False, num_workers=0,
+            collate_fn=self.data_collator
+        )
+        self.list_of_individual_testloader.append(individual_test_loader)
+
         self.model.train()
         self.model.to(self.device)
         self.global_model.to(self.device)
-
-    # def beforeTrain(self, current_task):
-    #     # 停用训练中特定于训练的操作（如 Dropout 和 BatchNorm）
-    #     self.model.eval()
-    #
-    #     # 确定当前任务的类别范围
-    #     if current_task == 0:
-    #         self.classes = [0, self.numclass]
-    #     else:
-    #         self.classes = [self.numclass - self.task_size, self.numclass]
-    #
-    #     # 初始化特定类别的嵌入
-    #     # self.model.centers_initial(self.classes)
-    #
-    #     self.test_set = self.test_set.filter(lambda example: example['label'] in self.classes)
-    #
-    #     # 使用 tokenizer 对测试集和验证集进行编码
-    #     def preprocess_function(examples):
-    #         return self.global_model.tokenizer(
-    #             examples['input_text'],
-    #             padding='max_length',
-    #             truncation=True,
-    #             max_length=128
-    #         )
-    #
-    #     # 对测试集和验证集进行编码预处理, 得到input_ids和attention mask
-    #     self.test_set = self.test_set.map(preprocess_function, batched=True)
-    #     # self.valid_set = self.valid_set.map(preprocess_function, batched=True) if self.valid_set else None
-    #
-    #     # 创建 DatasetSplit 子集
-    #     self.test_dataset = DatasetSplit(self.test_set, list(range(len(self.test_set))))
-    #     # self.valid_dataset = DatasetSplit(self.valid_set, list(range(len(self.valid_set)))) if self.valid_set else None
-    #
-    #     # 基于DatasetSplit后创建dataloader
-    #     self.test_loader = DataLoader(self.test_dataset, batch_size=self.args.local_bs, shuffle=False, num_workers=0,
-    #                                   collate_fn=self.data_collator)
-    #     self.list_of_testloader.append(self.test_loader)
-    #
-    #     # 使用 DataLoader 加载验证集
-    #     # if self.valid_dataset:
-    #     #     self.valid_loader = DataLoader(self.valid_dataset, batch_size=self.args.local_bs, shuffle=False,
-    #     #                                    num_workers=0, collate_fn=self.data_collator)
-    #     # else:
-    #     #     print("Warning: valid_set not found. Validation loader is not initialized.")
-    #
-    #     # 模型切换为训练模式并加载到设备
-    #     self.model.train()
-    #     self.model.to(self.device)
-    #     self.global_model.to(self.device)
 
     def train(self, current_task, old_class=0, tf_writer=None, logger_file=None):
         bst_acc = -1
@@ -334,14 +231,14 @@ class vitlora:
         center_lr = self.args.centers_lr
         encoder_lr = self.args.encoders_lr
 
-        best_acc = 0.0  
-        early_stopping_patience = 10  
-        current_patience = 0
+        # best_acc = 0.0
+        # early_stopping_patience = 10
+        # current_patience = 0
 
         for epoch in tqdm(range(self.args.epochs)):
             local_weights = []
-            count_num= [[] for i in range(0, self.task_size)]
-            feature_list = [[] for i in range(0, self.task_size)]
+            # count_num= [[] for i in range(0, self.task_size)]
+            # feature_list = [[] for i in range(0, self.task_size)]
             sample_num = []
             m = self.args.client_local
             # 每一轮随机从num_users中选取m个客户端参与训练
@@ -459,36 +356,44 @@ class vitlora:
     #     self.old_model.eval()
 
     def afterTrain(self, current_task):
+        # 更新类别数量
+        self.numclass = min((current_task + 1) * self.task_size, self.total_classes)
+
+        # 在每个任务结束后保存每个任务的独立测试集上的准确率
+        current_acc = []
+        for i, test_loader in enumerate(self.list_of_individual_testloader):
+            acc, _ = self.inference(self.global_model, test_loader)
+            current_acc.append(acc)
+        self.task_accuracies.append(current_acc)
+
         # 创建保存模型的目录
         path = os.path.join(self.args.save_path, self.file_name)
         if not os.path.isdir(path):
             os.makedirs(path)
 
-        # 更新类别数量
-        self.numclass = min(self.numclass + self.task_size, self.total_classes)
-
         if self.numclass >= self.total_classes:
             print("Reached the maximum number of classes. Training complete.")
-            exit()
+            return
+
         # 保存当前的全局模型
         filename = path + '%d_model.pkl' % (self.numclass - self.task_size)
         torch.save(self.global_model.state_dict(), filename)
 
-        # 遍历模型参数并保存 LoRA 相关的参数
-        for name, param in self.model.named_parameters():
-            # 保存 LoRA 的参数
-            if 'lora_A' in name.lower():
-                # 检查并保存 query 和 value 相关的 LoRA 参数
-                if 'query' in name:
-                    self.W_aq.append(param.data.clone())
-                elif 'value' in name:
-                    self.W_av.append(param.data.clone())
-            if 'lora_B' in name.lower():
-                # 检查并保存 query 和 value 相关的 LoRA 参数
-                if 'query' in name:
-                    self.W_bq.append(param.data.clone())
-                elif 'value' in name:
-                    self.W_bv.append(param.data.clone())
+        # # 遍历模型参数并保存 LoRA 相关的参数
+        # for name, param in self.model.named_parameters():
+        #     # 保存 LoRA 的参数
+        #     if 'lora_A' in name.lower():
+        #         # 检查并保存 query 和 value 相关的 LoRA 参数
+        #         if 'query' in name:
+        #             self.W_aq.append(param.data.clone())
+        #         elif 'value' in name:
+        #             self.W_av.append(param.data.clone())
+        #     if 'lora_B' in name.lower():
+        #         # 检查并保存 query 和 value 相关的 LoRA 参数
+        #         if 'query' in name:
+        #             self.W_bq.append(param.data.clone())
+        #         elif 'value' in name:
+        #             self.W_bv.append(param.data.clone())
 
         # 更新旧模型为最新的训练后模型
         self.old_model = copy.deepcopy(self.global_model)

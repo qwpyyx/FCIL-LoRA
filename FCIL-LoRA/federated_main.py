@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Python version: 3.6
-
+# Revised by Adonis
 
 import os
 import warnings
@@ -42,12 +42,9 @@ if __name__ == '__main__':
     args.store_name = '_'.join(
         [args.dataset, args.model, args.type, 'lr-' + str(args.centers_lr)])
     cur_path = os.path.abspath(os.path.dirname(os.getcwd()))
-    # 在当前目录构建检查点和日志
     cur_path = cur_path
     prepare_folders(cur_path)
-    # 打印一些信息
     exp_details(args)
-
     setup_seed(args.seed)
 
     # BUILD MODEL
@@ -65,11 +62,9 @@ if __name__ == '__main__':
     global_model = vitlora(args, file_name, model, task_size, args.device)
     global_model.setup_data(shuffle=True)
 
-    # 冻结所有参数
+    # 固定所有参数，只更新lora参数
     for name, param in model.named_parameters():
         param.requires_grad = False
-
-    # 解冻 LoRA 的参数
     for name, param in model.named_parameters():
         if "lora" in name.lower():
             param.requires_grad = True
@@ -94,5 +89,38 @@ if __name__ == '__main__':
         # 执行任务相关的初始化
         global_model.beforeTrain(i)
         # 训练和后处理
+        # 如果任务已完成，则跳出循环
+        if global_model.all_tasks_completed:
+            break
+
         global_model.train(i, old_class=old_class, tf_writer=tf_writer, logger_file=logger_file)
         global_model.afterTrain(i)
+
+    # 计算 ACC 和 FGT
+    task_num = len(global_model.task_accuracies)
+    # 计算 ACC：对每个任务的准确率求和，再除以任务数和任务大小
+    acc = sum([sum(task_acc) for task_acc in global_model.task_accuracies]) / (task_num * global_model.task_size)
+
+    # 计算 FGT
+    fgt = 0
+    if task_num > 1:
+        for i in range(1, task_num):
+            for j in range(i):
+                fgt += global_model.previous_task_accuracies[i - 1][j] - global_model.task_accuracies[i][j]
+        fgt /= (task_num - 1)
+
+    print(f"Final Average Accuracy (ACC): {acc:.4f}%")
+    print(f"Final Forgetting (FGT): {fgt:.4f}%")
+
+    # 将 ACC 和 FGT 记录到 TensorBoard
+    tf_writer.add_scalar('Final/ACC', acc)
+    tf_writer.add_scalar('Final/FGT', fgt)
+
+    # 将 ACC 和 FGT 写入日志文件
+    output_log = f"Final Average Accuracy (ACC): {acc:.4f}%, Final Forgetting (FGT): {fgt:.4f}%\n"
+    logger_file.write(output_log)
+    logger_file.flush()
+
+# 关闭日志文件和 TensorBoard writer
+logger_file.close()
+tf_writer.close()
