@@ -116,13 +116,18 @@ def split_single_dataset(args, class_order):
     assert nb_classes % (args.task_num + 1) == 0
     classes_per_task = nb_classes // (args.task_num + 1)
 
+    labels = [i for i in range(nb_classes)]
+
     mask = list()
 
-    class_till_now = classes_per_task
+    # if args.shuffle:
+    #     random.shuffle(labels)
+    # class_till_now = classes_per_task
     for _ in range(args.task_num + 1):
-        # 使用 class_order 而不是原始的 labels 列表来进行划分
-        scope = class_order[:class_till_now]
-        class_till_now += classes_per_task
+        # scope = class_order[:class_till_now]
+        # class_till_now += classes_per_task
+        scope = labels[:classes_per_task]
+        labels = labels[classes_per_task:]
 
         mask.append(scope)
 

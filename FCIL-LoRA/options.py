@@ -71,5 +71,10 @@ def args_parser():
     parser.add_argument('--niid_type', default='Q', type=str, help='Quality or Distributed(non-iid)')
     parser.add_argument('--alpha', default=6, type=int, help='quantity skew')
     parser.add_argument('--beta', default=0.5, type=float, help='distribution skew')
+    parser.add_argument('--mode', type=str, default='federated', choices=['federated', 'centralized'],
+                        help="Mode: 'federated' or 'centralized'")
+    parser.add_argument('--model_path', type=str, default='/home/qiuwenqi/LLM/models/roberta-base',
+                        help="moedel_name: roberta or llama2")
+
     args = parser.parse_args()
     return args

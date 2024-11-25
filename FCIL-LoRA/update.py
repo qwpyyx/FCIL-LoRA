@@ -64,25 +64,6 @@ class LocalUpdate(object):
         self.trainloader = DataLoader(self.client_dataset, batch_size=self.args.local_bs, shuffle=True, num_workers=0,
                                       collate_fn=self.data_collator)
 
-        # network_params = []
-        # # kkk = []
-        # for name, param in model.named_parameters():
-        #     # 判断哪些层需要更新，只更新 LoRA 部分和确保 requires_grad 为 True
-        #     if 'lora' in name.lower() and param.requires_grad:
-        #         lr = lr_e
-        #         param_group = {'params': [param], 'lr': lr, 'weight_decay': 0.00001}
-        #         network_params.append(param_group)
-                # kkk.append(name)
-        # # 打印需要更新的层以确认
-        # for param_group in network_params:
-        #     for p in param_group['params']:
-        #         print(f"Updating parameter: {p.shape}, requires_grad: {p.requires_grad}")
-
-
-        # 使用这些参数构建优化器
-        # self.optimizer = torch.optim.Adam(network_params)
-
-
     def update_weights(self, model, old_model, lr_c, lr_e, Waq, Wav, unique_labels):
         # print(model)
         # pg = [p for p in model.parameters() if p.requires_grad]
@@ -99,29 +80,8 @@ class LocalUpdate(object):
                 param_group = {'params': [param], 'lr': lr, 'weight_decay': 0.00001}
                 network_params.append(param_group)
 
-        # 打印需要更新的层以确认
-        # for param_group in network_params:
-        #     for p in param_group['params']:
-        #         print(f"Updating parameter: {p.shape}, requires_grad: {p.requires_grad}")
-
         # 使用这些参数构建优化器
         self.optimizer = torch.optim.Adam(network_params)
-
-
-
-        # 将所有可能的类别动态获取，而不是硬编码为 10
-        # 获取所有标签的集合
-        # all_classes = unique_labels
-        # label_feature_dict = {cls: [] for cls in all_classes}
-        # a = []
-        # b = []
-        # for name, param in model.named_parameters():
-        #     # 判断哪些层需要更新，只更新 LoRA 部分和确保 requires_grad 为 True
-        #     if 'lora' in name.lower() and param.requires_grad:
-        #         lr = lr_e
-        #         param_group = {'params': [param], 'lr': lr, 'weight_decay': 0.00001}
-        #         a.append(param_group)
-        #         b.append(name)
 
         # Local epoch
         for iter in range(self.args.local_ep):
@@ -164,26 +124,6 @@ class LocalUpdate(object):
                 #     loss = loss_dce
 
                 loss_dce.backward()
-
-                # for name, param in model.named_parameters():
-                #     if 'lora_A' in name and param.grad is not None:
-                #         print(f"Gradient for {name}: {param.grad.norm().item()}")
-                #
-                # for name, param in model.named_parameters():
-                #     if 'lora_B' in name and param.grad is not None:
-                #         print(f"Gradient for {name}: {param.grad.norm().item()}")
-                #
-                # # 检查梯度
-                # for name, param in model.named_parameters():
-                #     if 'lora_B' in name:
-                #         print(f"Value of {name} before optimizer step: {param[0][0].item()}")
-                #         break
-                #
-                # for name, param in model.named_parameters():
-                #     if 'lora_A' in name:
-                #         print(f"Value of {name} before optimizer step: {param[0][0].item()}")
-                #         break
-
                 self.optimizer.step()
 
             # 打印更新后的 lora_A 参数

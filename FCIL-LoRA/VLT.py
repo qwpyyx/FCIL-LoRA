@@ -68,6 +68,7 @@ class LLMWithLoRA(nn.Module):
         self.lora_layer = lora_layer if lora_layer else ["q_proj", "v_proj"]
 
         # PEFT的LoRA配置
+        # TODO CAUSAL_LM是不是一种选择？
         lora_config = LoraConfig(task_type=TaskType.SEQ_CLS,
                                  inference_mode=False, r=r,
                                  lora_alpha=32,
