@@ -181,6 +181,7 @@ class vitlora:
                        'train_loader'), "Train loader not found. Make sure beforeTrain_raw is called before raw_train."
 
         # 设置优化器，只更新 LoRA 部分的参数
+        # TODO 注意encoders_lr非常影响效果
         network_params = []
         for name, param in self.model.named_parameters():
             if 'lora' in name.lower() and param.requires_grad:

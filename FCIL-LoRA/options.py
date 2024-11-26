@@ -23,7 +23,7 @@ def args_parser():
                         help="local batch size: B")
     parser.add_argument('--centers_lr', type=float, default=0.003,
                         help='learning rate')
-    parser.add_argument('--encoders_lr', type=float, default=1e-5,
+    parser.add_argument('--encoders_lr', type=float, default=1e-4,
                         help='learning rate')
     parser.add_argument('--momentum', type=float, default=0.5,
                         help='SGD momentum (default: 0.5)')

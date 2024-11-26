@@ -41,10 +41,10 @@ if __name__ == '__main__':
     args.type = 'iid' if args.iid == 1 else 'non-iid'
     if args.mode == 'centralized':
         args.store_name = '_'.join(
-            [args.dataset, args.model, args.mode, 'lr-' + str(args.centers_lr)])
+            [args.dataset, args.model, args.mode, 'lr-' + str(args.encoders_lr)])
     else:
         args.store_name = '_'.join(
-            [args.dataset, args.model, args.mode, args.type, 'lr-' + str(args.centers_lr)])
+            [args.dataset, args.model, args.mode, args.type, 'lr-' + str(args.encoders_lr)])
 
     cur_path = os.path.join(os.path.abspath(os.getcwd()), 'PILoRA-cifar')
     prepare_folders(cur_path)

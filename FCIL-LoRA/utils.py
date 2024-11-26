@@ -377,7 +377,7 @@ def exp_details(args):
     print('\nExperimental details:')
     print(f'    Model     : {args.model}')
     print(f'    Optimizer : {args.optimizer}')
-    print(f'    Learning  : {args.centers_lr}')
+    print(f'    Learning  : {args.encoders_lr}')
     print(f'    Global Rounds   : {args.epochs}\n')
 
     print('    Federated parameters:')
