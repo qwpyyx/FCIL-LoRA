@@ -75,6 +75,8 @@ def args_parser():
                         help="Mode: 'federated' or 'centralized'")
     parser.add_argument('--model_path', type=str, default='/home/qiuwenqi/LLM/models/roberta-base',
                         help="moedel_name: roberta or llama2")
-
+    parser.add_argument('--combine', default=False, type=bool, help='Whether to combine the data')
+    parser.add_argument('--is_peft', type=int, default=1,
+                        help="Whether to use peft such as lora to fine tune model")
     args = parser.parse_args()
     return args

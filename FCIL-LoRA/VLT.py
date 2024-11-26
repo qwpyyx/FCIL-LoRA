@@ -1,14 +1,5 @@
-from timm import create_model
-from functools import reduce
-from operator import mul
-import math
 import torch
 import torch.nn as nn
-from safetensors import safe_open
-from safetensors.torch import save_file
-from torch.nn.parameter import Parameter
-from torch import Tensor
-import numpy as np
 
 from transformers import (
     AutoConfig,
@@ -27,11 +18,11 @@ from peft import get_peft_model, LoraConfig, TaskType, PeftModel, PeftConfig
 class LLMWithLoRA(nn.Module):
     def __init__(self,
                  modelname: str,
+                 is_peft: bool,
                  num_classes: int,
                  r: int = 4,
                  lora_layer=None,
-                 return_feature=True,
-                 ):
+                 return_feature=True):
         super().__init__()
 
         self.config = AutoConfig.from_pretrained(
@@ -64,24 +55,55 @@ class LLMWithLoRA(nn.Module):
         self.num_classes = num_classes
         self.return_feature = return_feature
 
-        # 使用LoRA配置参数
-        self.lora_layer = lora_layer if lora_layer else ["q_proj", "v_proj"]
+        if is_peft:
+            # 使用LoRA配置参数
+            self.lora_layer = lora_layer if lora_layer else ["q_proj", "v_proj"]
 
-        # PEFT的LoRA配置
-        # TODO CAUSAL_LM是不是一种选择？
-        lora_config = LoraConfig(task_type=TaskType.SEQ_CLS,
-                                 inference_mode=False, r=r,
-                                 lora_alpha=32,
-                                 target_modules=self.lora_layer,
-                                 lora_dropout=0.1)
+            # PEFT的LoRA配置
+            # TODO CAUSAL_LM是不是一种选择？
+            lora_config = LoraConfig(task_type=TaskType.SEQ_CLS,
+                                     inference_mode=False, r=r,
+                                     lora_alpha=32,
+                                     target_modules=self.lora_layer,
+                                     lora_dropout=0.1)
 
-        self.model = get_peft_model(self.model, lora_config)
+            self.model = get_peft_model(self.model, lora_config)
+
+            # 固定所有参数，只更新lora参数
+            for name, param in self.model.named_parameters():
+                param.requires_grad = False
+            for name, param in self.model.named_parameters():
+                if "lora" in name.lower():
+                    param.requires_grad = True
+        else:
+            # full fine tune
+            for param in self.model.parameters():
+                param.requires_grad = True
 
         self.model.resize_token_embeddings(len(self.tokenizer))
 
-        # 初始化类别中心（如果需要使用）
-        # self.feat_dim = 768
-        # self.centers = nn.ParameterList([nn.Parameter(0.1 * torch.randn(self.feat_dim, 1)) for _ in range(self.num_classes)])
+    # def full_finetune(self, input_ids, attention_mask, labels, lr):
+    #     """
+    #     全量微调，更新模型的所有参数。
+    #     """
+    #     # 通过Adam优化器对所有模型参数进行训练
+    #     optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+    #
+    #     # 前向传播
+    #     logits = self.model(input_ids=input_ids, attention_mask=attention_mask).logits
+    #     loss_fct = torch.nn.CrossEntropyLoss()
+    #     loss = loss_fct(logits, labels)
+    #
+    #     # 反向传播和优化
+    #     optimizer.zero_grad()
+    #     loss.backward()
+    #     optimizer.step()
+    #
+    #     return loss, logits
+
+    # 初始化类别中心（如果需要使用）
+    # self.feat_dim = 768
+    # self.centers = nn.ParameterList([nn.Parameter(0.1 * torch.randn(self.feat_dim, 1)) for _ in range(self.num_classes)])
 
     def centers_initial(self, current_tasks):
         # 假设任务是某种增量文本分类，可以通过初始化特定类别的嵌入来实现类似的功能
@@ -124,7 +146,7 @@ class LLMWithLoRA(nn.Module):
         # else:
         #     return logits
 
-    def forward(self, input_ids, attention_mask):
+    def forward(self, **inputs):
         # 前向传播，获取分类 logits
         # print("Forward pass is called with input_ids shape:", input_ids.shape)
         # # 打印 LoRA 部分的输出或者检查 LoRA 部分的具体参与
@@ -136,7 +158,7 @@ class LLMWithLoRA(nn.Module):
         #     if 'lora_A' in name:
         #         print(f"Using parameter {name}: {param[0][0].item()} before forward pass")
 
-        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+        outputs = self.model(**inputs)
         logits = outputs.logits
 
         # 检查模型输出和 lora 的状态

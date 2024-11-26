@@ -13,7 +13,7 @@ from utils import exp_details
 from VLT import *
 from VITLORA import vitlora
 import random
-
+import numpy as np
 
 def setup_seed(seed):
     torch.manual_seed(seed)
@@ -23,9 +23,9 @@ def setup_seed(seed):
     torch.backends.cudnn.deterministic = True
 
 
-def prepare_folders(cur_path):
+def prepare_folders(cur_path, keyname):
     folders_util = [
-        os.path.join(cur_path + '/logs-roberta-large-LoRA', args.store_name),
+        os.path.join(cur_path + keyname, args.store_name),
         os.path.join(cur_path + '/checkpoints', args.store_name)]
     for folder in folders_util:
         if not os.path.exists(folder):
@@ -40,14 +40,21 @@ if __name__ == '__main__':
     task_size = int((args.total_classes - args.fg_nc) / args.task_num)  # number of classes in each incremental task
     args.type = 'iid' if args.iid == 1 else 'non-iid'
     if args.mode == 'centralized':
-        args.store_name = '_'.join(
-            [args.dataset, args.model, args.mode, 'lr-' + str(args.encoders_lr)])
+        if args.is_peft:
+            nam = "lora-peft-test"
+            args.store_name = '_'.join(
+                [args.dataset, args.model, args.mode, nam, 'lr-' + str(args.encoders_lr)])
+        else:
+            nam = "full-finetune"
+            args.store_name = '_'.join(
+                [args.dataset, args.model, args.mode, nam, 'lr-' + str(args.encoders_lr)])
     else:
         args.store_name = '_'.join(
             [args.dataset, args.model, args.mode, args.type, 'lr-' + str(args.encoders_lr)])
 
+    keyname = '/logs-FCIL-LoRA'
     cur_path = os.path.join(os.path.abspath(os.getcwd()), 'PILoRA-cifar')
-    prepare_folders(cur_path)
+    prepare_folders(cur_path, keyname)
     exp_details(args)
     setup_seed(args.seed)
 
@@ -55,9 +62,8 @@ if __name__ == '__main__':
     file_name = args.store_name
     class_set = list(range(args.total_classes))
 
-    # 这里改成LLM,而且是已经有了lora的架构
-    # 应该是config 和 model， peft
     model = LLMWithLoRA(modelname=args.model_path,  # 可以选择适合的LLM，例如't5-base'或其他预训练模型
+                        is_peft=args.is_peft,
                         num_classes=args.total_classes,
                         r=args.r,
                         lora_layer=["query", "value"])  # 指定 LoRA 作用的层
@@ -89,8 +95,8 @@ if __name__ == '__main__':
             old_class = 0 if i == 0 else len(class_set[:args.fg_nc + (i - 1) * task_size])
 
             filename = 'log_task{}.txt'.format(i)
-            logger_file = open(os.path.join(cur_path + '/logs-roberta-large-LoRA', args.store_name, filename), 'w')
-            tf_writer = SummaryWriter(log_dir=os.path.join(cur_path + '/logs-roberta-large-LoRA', args.store_name))
+            logger_file = open(os.path.join(cur_path + keyname, args.store_name, filename), 'w')
+            tf_writer = SummaryWriter(log_dir=os.path.join(cur_path + keyname, args.store_name))
 
             # 执行任务相关的初始化
             global_model.beforeTrain(i)
@@ -134,21 +140,17 @@ if __name__ == '__main__':
     # ------------------------------------------------------------------------------------
     elif args.mode == 'centralized':
         # 初始化模型
-        centralized_model = LLMWithLoRA(modelname=args.model_path,
-                                        num_classes=args.total_classes,
-                                        r=args.r,
-                                        lora_layer=["query", "value"])
+        centralized_model = model
         centralized_model = centralized_model.to(args.device)
-
-        # 固定所有参数，只更新lora参数
-        for name, param in centralized_model.named_parameters():
-            param.requires_grad = False
-        for name, param in centralized_model.named_parameters():
-            if "lora" in name.lower():
-                param.requires_grad = True
 
         # 集中式方法
         print("Starting centralized raw method training...")
+        print("Whether use peft? {}".format(args.is_peft))
+
+        num_params = np.sum([p.numel() for p in model.parameters() if p.requires_grad or not p.requires_grad])
+        learnable_params = np.sum([p.numel() if p.requires_grad else 0 for p in model.parameters()])
+        print('# of learnable params: {}; total params: {}; Proportion: {:.4f}%'.format(learnable_params, num_params, (
+                learnable_params / num_params) * 100))
 
         # 初始化数据
         centralized_trainer = vitlora(args, file_name, centralized_model, task_size, args.device)
@@ -165,8 +167,8 @@ if __name__ == '__main__':
 
             # 训练
             filename = 'log_task_raw{}.txt'.format(i)
-            logger_file = open(os.path.join(cur_path + '/logs-roberta-large-LoRA', args.store_name, filename), 'w')
-            tf_writer = SummaryWriter(log_dir=os.path.join(cur_path + '/logs-roberta-large-LoRA', args.store_name))
+            logger_file = open(os.path.join(cur_path + keyname, args.store_name, filename), 'w')
+            tf_writer = SummaryWriter(log_dir=os.path.join(cur_path + keyname, args.store_name))
 
             centralized_trainer.raw_train(current_task=i, old_class=0, tf_writer=tf_writer, logger_file=logger_file)
             centralized_trainer.afterTrain_raw(current_task=i)
@@ -186,6 +188,9 @@ if __name__ == '__main__':
 
         print(f"Final Average Accuracy (ACC): {acc:.4f}%")
         print(f"Final Forgetting (FGT): {fgt:.4f}%")
+
+        logger_file.write('Task_accuracies is {} + \n'.format(centralized_trainer.task_accuracies))
+        logger_file.write('previous_task_accuracies is {}'.format(centralized_trainer.previous_task_accuracies))
 
         # 将 ACC 和 FGT 记录到 TensorBoard
         tf_writer.add_scalar('Final/ACC', acc)

@@ -11,6 +11,7 @@ from datasets import concatenate_datasets, Dataset
 import json
 import pandas as pd
 
+
 class vitlora:
     def __init__(self, args, file_name, model, task_size, device):
         # 数据集路径设置为新的banking77数据集路径
@@ -20,16 +21,14 @@ class vitlora:
         self.args = args
         self.epochs = args.local_ep
         self.model = model
+        self.global_model = model
         self.numclass = args.fg_nc
         self.task_size = task_size
         self.device = device
 
-
         self.task_accuracies = []  # 保存每个任务结束后的最佳准确率
         self.previous_task_accuracies = []  # 保存每次任务开始前对所有已学任务的准确率
         self.list_of_individual_testloader = []  # 保存每个任务的独立测试集加载器
-
-        self.global_model = model
 
         # 加载banking77数据集，并确保正确映射输入和标签
         dataset = load_dataset('csv',
@@ -42,28 +41,21 @@ class vitlora:
         dataset = dataset.rename_column(original_column_name='category', new_column_name='label')
 
         # 分割训练集和验证集
-        # dataset_split = dataset['train']
         self.train_set = dataset['train']
-        # self.valid_set = dataset_split['test']
         self.test_set = dataset['test']
 
-        # 加载 clinc150 数据集并合并
-        # clinc150_train, clinc150_test = self._load_clinc150_data(
-        #     clinc150_data_path='/home/qiuwenqi/LLM/Datasets/clinc150/data_full.json'
-        # )
-        #
-        # # 将 clinc150 数据添加到 banking77 数据中
-        # self.train_set = self._merge_datasets(self.train_set, clinc150_train)
-        # self.test_set = self._merge_datasets(self.test_set, clinc150_test)
+        if self.args.combine:
+            # 加载 clinc150 数据集并合并
+            clinc150_train, clinc150_test = self._load_clinc150_data(
+                clinc150_data_path='/home/qiuwenqi/LLM/Datasets/clinc150/data_full.json'
+            )
 
-        # 更新类别总数
-        # self.numclass = max(self.train_set['label']) + 1
-
-
+            # 将 clinc150 数据添加到 banking77 数据中
+            self.train_set = self._merge_datasets(self.train_set, clinc150_train)
+            self.test_set = self._merge_datasets(self.test_set, clinc150_test)
 
         # 数据转换
         self.data_collator = DataCollatorWithPadding(tokenizer=self.global_model.tokenizer)
-
         self.classes = None
         self.old_model = None
         self.list_of_testloader = list()
@@ -109,9 +101,10 @@ class vitlora:
 
         # 设置当前任务的类别范围
         if current_task == 0:
-            self.classes = [0, self.task_size]
+            self.classes = [0, self.args.fg_nc]  # 第一个任务
         else:
-            self.classes = [self.numclass, min((current_task + 1) * self.task_size, self.total_classes)]
+            self.classes = [self.args.fg_nc + (current_task - 1) * self.task_size,
+                            min(self.args.fg_nc + current_task * self.task_size, self.total_classes)]  # 后续任务
 
         print(f"Now is training task {current_task}")
 
@@ -128,7 +121,8 @@ class vitlora:
         print(f"test_class is 0 to {self.classes[1]}")
 
         # 筛选当前任务相关的训练集样本，只包含当前任务的新类别
-        self.train_set = self.preprocessed_train_set.filter(lambda example: self.classes[0] <= example['label'] < self.classes[1])
+        self.train_set = self.preprocessed_train_set.filter(
+            lambda example: self.classes[0] <= example['label'] < self.classes[1])
 
         # 创建 DatasetSplit 和 DataLoader（集中式场景下的）
         self.train_dataset = DatasetSplit(self.train_set, list(range(len(self.train_set))))
@@ -145,9 +139,7 @@ class vitlora:
             collate_fn=self.data_collator
         )
 
-        # 增加用于测试的独立测试集加载器（仅测试当前任务类别）
-        start_class = current_task * self.task_size
-        end_class = min((current_task + 1) * self.task_size, self.total_classes)
+        start_class, end_class = self.classes
 
         current_test_set = self.preprocessed_test_set.filter(
             lambda example: start_class <= example['label'] < end_class)
@@ -183,8 +175,17 @@ class vitlora:
         # 设置优化器，只更新 LoRA 部分的参数
         # TODO 注意encoders_lr非常影响效果
         network_params = []
-        for name, param in self.model.named_parameters():
-            if 'lora' in name.lower() and param.requires_grad:
+
+        # for name, param in self.model.named_parameters():
+        #     if param.requires_grad == True:
+        #         print(name)
+
+        if self.args.is_peft:
+            for name, param in self.model.named_parameters():
+                if 'lora' in name.lower() and param.requires_grad:
+                    network_params.append({'params': param, 'lr': self.args.encoders_lr, 'weight_decay': 0.00001})
+        else:
+            for param in self.model.parameters():
                 network_params.append({'params': param, 'lr': self.args.encoders_lr, 'weight_decay': 0.00001})
 
         # 构建 Adam 优化器
@@ -202,45 +203,31 @@ class vitlora:
 
             # 使用 train_loader 进行训练
             for batch_idx, batch in enumerate(self.train_loader):
-                input_ids = batch['input_ids'].to(self.device)
-                attention_mask = batch['attention_mask'].to(self.device)
-                labels = batch['labels'].to(self.device)
+                inputs = {
+                'input_ids': batch['input_ids'].to(self.device),
+                'attention_mask': batch['attention_mask'].to(self.device),
+                'labels': batch['labels'].to(self.device)
+                }
 
                 # 清空梯度
                 optimizer.zero_grad()
 
                 # 前向传播
-                logits = self.model(input_ids=input_ids, attention_mask=attention_mask)
+                logits = self.model(**inputs)
 
                 # 计算分类交叉熵损失
                 loss_fct = torch.nn.CrossEntropyLoss()
-                loss = loss_fct(logits, labels)
+                loss = loss_fct(logits, inputs['labels'])
 
                 # 反向传播和优化
                 loss.backward()
                 optimizer.step()
 
                 # 统计损失和准确率
-                total_loss += loss.item() * len(labels)
+                total_loss += loss.item() * len(inputs['labels'])
                 _, preds = torch.max(logits, dim=1)
-                total_correct += (preds == labels).sum().item()
-                num_samples += len(labels)
-
-            # post_train_params = {name: param.clone() for name, param in self.model.named_parameters()}
-
-            # # 比较前后的参数是否有变化
-            # updated = False
-            # for name in pre_train_params:
-            #     if not torch.equal(pre_train_params[name], post_train_params[name]):
-            #         updated = True
-            #         break
-            #
-            # # 打印是否更新
-            # if updated:
-            #     print(f"Model parameters updated after epoch {epoch + 1}.")
-            # else:
-            #     print(f"No changes in model parameters after epoch {epoch + 1}.")
-
+                total_correct += (preds == inputs['labels']).sum().item()
+                num_samples += len(inputs['labels'])
 
             # 计算平均损失和准确率
             avg_loss = total_loss / num_samples
@@ -279,11 +266,7 @@ class vitlora:
             logger_file.write(output_log + '\n')
             logger_file.flush()
 
-        # 使用 global_server 更新全局模型
-        # self.global_model = global_server(self.model, self.global_model)
-
         return test_acc
-
 
     def preprocess_test_set(self):
         # 定义预处理函数
@@ -343,7 +326,7 @@ class vitlora:
     def save_checkpoint(self, state, is_best):
         # 拼接路径
         checkpoint_dir = os.path.join(
-            os.path.abspath(os.path.dirname(os.getcwd())) + '/checkpoints',
+            os.path.abspath(os.path.dirname(os.getcwd())) + 'PILoRA-cifar' + '/checkpoints_epoch',
             self.args.store_name
         )
 
@@ -420,7 +403,8 @@ class vitlora:
             return
 
         # 筛选当前任务相关的样本
-        self.test_set = self.preprocessed_test_set.filter(lambda example: self.classes[0] <= example['label'] < self.classes[1])
+        self.test_set = self.preprocessed_test_set.filter(
+            lambda example: self.classes[0] <= example['label'] < self.classes[1])
 
         # 创建 DatasetSplit 和 DataLoader
         self.test_dataset = DatasetSplit(self.test_set, list(range(len(self.test_set))))
@@ -503,7 +487,6 @@ class vitlora:
             # 更新用户组
             user_groups = user_groups_mapped
 
-
             for idx in idxs_users:
                 # 每个客户端使用其对应的索引
                 local_data_indices = user_groups[idx]
@@ -518,9 +501,9 @@ class vitlora:
 
                 # Local Epoch
                 w, _ = local_model.update_weights(
-                    model=copy.deepcopy(self.model), old_model=copy.deepcopy(self.old_model), lr_c=center_lr, lr_e=encoder_lr,
+                    model=copy.deepcopy(self.model), old_model=copy.deepcopy(self.old_model), lr_c=center_lr,
+                    lr_e=encoder_lr,
                     Waq=self.W_aq, Wav=self.W_av, unique_labels=unique_labels)
-
 
                 # local model
                 local_weights.append(copy.deepcopy(w))
@@ -533,12 +516,12 @@ class vitlora:
                 #     else:
                 #         print(f"Warning: The Class {cls} is out of range for numclass {self.numclass}")
 
-            average_weight = [i/sum(sample_num) for i in sample_num]
+            average_weight = [i / sum(sample_num) for i in sample_num]
 
             # # update global weights
             # self.model.load_state_dict(self.model)
             self.model.load_state_dict(average_weights(local_weights, self.model, self.classes,
-                                                        self.args.niid_type, average_weight, self.numclass))
+                                                       self.args.niid_type, average_weight, self.numclass))
             self.global_model = global_server(self.model, self.global_model)
             # self.model_ave.load_state_dict(average_weights2(local_weights, self.model))
 
@@ -621,8 +604,8 @@ class vitlora:
         print(" had done {} tasks".format(current_task))
 
     def afterTrain_raw(self, current_task):
-        # 更新类别数量
-        self.numclass = min((current_task + 1) * self.task_size, self.total_classes)
+        # 获取当前任务的类别范围
+        start_class, end_class = self.classes  # 直接复用 self.classes
 
         # 在每个任务结束后保存每个任务的独立测试集上的准确率
         current_acc = []
@@ -636,19 +619,14 @@ class vitlora:
         if not os.path.isdir(path):
             os.makedirs(path)
 
-        if self.numclass >= self.total_classes:
+        # 检查是否完成所有任务
+        if end_class >= self.total_classes:
             print("Reached the maximum number of classes. Training complete.")
             return
 
         # 保存当前的模型
-        filename = path + '%d_model.pkl' % (self.numclass - self.task_size)
+        filename = os.path.join(path, f'{end_class - self.task_size}_model.pkl')
         torch.save(self.model.state_dict(), filename)
-
-        # 更新旧模型为当前任务完成后的模型
-        # self.old_model = copy.deepcopy(self.model)
-        # self.old_model.load_state_dict(torch.load(filename, map_location=self.device))
-        # self.old_model.to(self.device)
-        # self.old_model.eval()
 
         print(100 * '#')
         print(f"Completed training task {current_task}")

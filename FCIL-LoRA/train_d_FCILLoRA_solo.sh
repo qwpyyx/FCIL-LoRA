@@ -1,1 +1,1 @@
-python3 federated_main.py --model=FCILLoRA_beta_5 --dataset=banking77 --iid=0 --centers_lr=1e-3 --encoders_lr=1e-3 --epochs=5 --gpu 3 --task_num 6 --fg_nc 11 --total_classes 77 --local_ep 3 --num_users 30 --client_local 10 --niid_type D --beta 5 --local_bs=32
+python3 federated_main.py --mode centralized --model=FCILLoRA_roberta_base --dataset=banking77_clinc150 --iid=0 --centers_lr=1e-4 --encoders_lr=1e-4 --epochs=15 --gpu 3 --task_num 10 --fg_nc 26 --total_classes 226 --local_ep 10 --num_users 30 --client_local 10 --niid_type D --beta 0.1 --local_bs=64
