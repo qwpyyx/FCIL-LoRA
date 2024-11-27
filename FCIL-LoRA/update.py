@@ -32,7 +32,7 @@ class DatasetSplit(Dataset):
         return {
             'input_ids': example['input_ids'],
             'attention_mask': example['attention_mask'],
-            'label': example['label']
+            'labels': example['label']
         }
 
     def get_all_labels(self):

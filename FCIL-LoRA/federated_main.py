@@ -5,7 +5,7 @@
 
 import os
 import warnings
-
+os.environ["WANDB_MODE"] = "disabled"
 warnings.filterwarnings('ignore')
 from tensorboardX import SummaryWriter
 from options import args_parser
@@ -41,7 +41,7 @@ if __name__ == '__main__':
     args.type = 'iid' if args.iid == 1 else 'non-iid'
     if args.mode == 'centralized':
         if args.is_peft:
-            nam = "lora-peft-test"
+            nam = "lora-peft"
             args.store_name = '_'.join(
                 [args.dataset, args.model, args.mode, nam, 'lr-' + str(args.encoders_lr)])
         else:
@@ -171,7 +171,7 @@ if __name__ == '__main__':
             tf_writer = SummaryWriter(log_dir=os.path.join(cur_path + keyname, args.store_name))
 
             centralized_trainer.raw_train(current_task=i, old_class=0, tf_writer=tf_writer, logger_file=logger_file)
-            centralized_trainer.afterTrain_raw(current_task=i)
+            centralized_trainer.afterTrain_raw(current_task=i, logger_file=logger_file)
 
         # 计算 ACC 和 FGT
         task_num = len(centralized_trainer.task_accuracies)

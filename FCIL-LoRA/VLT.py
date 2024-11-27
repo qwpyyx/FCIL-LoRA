@@ -65,7 +65,9 @@ class LLMWithLoRA(nn.Module):
                                      inference_mode=False, r=r,
                                      lora_alpha=32,
                                      target_modules=self.lora_layer,
-                                     lora_dropout=0.1)
+                                     bias="none",
+                                     lora_dropout=0.1,
+                                     fan_in_fan_out=True)
 
             self.model = get_peft_model(self.model, lora_config)
 
@@ -81,25 +83,6 @@ class LLMWithLoRA(nn.Module):
                 param.requires_grad = True
 
         self.model.resize_token_embeddings(len(self.tokenizer))
-
-    # def full_finetune(self, input_ids, attention_mask, labels, lr):
-    #     """
-    #     全量微调，更新模型的所有参数。
-    #     """
-    #     # 通过Adam优化器对所有模型参数进行训练
-    #     optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
-    #
-    #     # 前向传播
-    #     logits = self.model(input_ids=input_ids, attention_mask=attention_mask).logits
-    #     loss_fct = torch.nn.CrossEntropyLoss()
-    #     loss = loss_fct(logits, labels)
-    #
-    #     # 反向传播和优化
-    #     optimizer.zero_grad()
-    #     loss.backward()
-    #     optimizer.step()
-    #
-    #     return loss, logits
 
     # 初始化类别中心（如果需要使用）
     # self.feat_dim = 768
