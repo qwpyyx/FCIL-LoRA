@@ -252,20 +252,9 @@ def compute_weight(centers_list, feature_list, epsilon=1e-6, device='cuda'):
 
 
 def average_weights(weights_list, model, classes, niid_type, backbone_weight, numclass, device='cuda'):
-    # 初始化列表来保存中心向量
-    # centers_list = [[] for _ in range(0, numclass)]
+
     trainable_params = get_trainable_param_names(model)
-    # idx = 0
 
-    # 获取 centers 的权重列表
-    # for _, name in enumerate(trainable_params):
-    #     if name.startswith('centers'):
-    #         for w in weights_list:
-    #             centers_list[idx].append(w[name].squeeze().detach())
-    #         idx += 1
-
-    # 计算权重 w
-    # weight = compute_weight(centers_list, feature_list, epsilon=1e-6, device=device)
 
     avg_weights = collections.OrderedDict()
     weight_names = weights_list[0].keys()
@@ -278,25 +267,6 @@ def average_weights(weights_list, model, classes, niid_type, backbone_weight, nu
             # 确保所有张量在同一设备上
             aggregated_weight_tensor = torch.stack([w[name].to(device) * backbone_weight[i] for i, w in enumerate(weights_list)]).sum(dim=0)
             avg_weights[name] = aggregated_weight_tensor
-
-
-    # 遍历所有权重名，计算平均权重
-    # for name in weight_names:
-    #     if name not in trainable_params:
-    #         if name in model.state_dict():
-    #             avg_weights[name] = model.state_dict()[name]
-    #     else:
-    #         if name.startswith('centers'):
-    #             # 将所有张量转移到指定设备上（例如 GPU）
-    #             aggregated_weight_tensor = torch.stack(
-    #                 [w[name].to(device) * weight[index][i].to(device) for i, w in enumerate(weights_list)]
-    #             ).sum(dim=0)
-    #             avg_weights[name] = aggregated_weight_tensor
-    #             index += 1
-    #         else:
-    #             avg_weights[name] = torch.stack(
-    #                 [w[name].to(device) * backbone_weight[i] for i, w in enumerate(weights_list)]
-    #             ).sum(dim=0).to(device)
 
     return avg_weights
 
@@ -424,4 +394,33 @@ def initialize_datasets(self):
     else:
         print("Warning: valid_set not found. Validation loader is not initialized.")
 
+
+def compute_forgetting_rate(task_accuracies, previous_task_accuracies):
+    """
+    计算每个任务的遗忘度（基于已学任务的准确率衰退）。
+    """
+    forgetting_rates = []
+
+    # 遍历任务，计算每个任务的遗忘度
+    for task_idx in range(1, len(task_accuracies)):
+        total_fgt_task = 0  # 当前任务的总遗忘度
+        total_categories = 0  # 当前任务的类别数
+
+        # 遍历当前任务与所有前任务之间的准确率变化
+        for subtask_idx in range(task_idx):
+            current_accuracies = task_accuracies[task_idx]
+            previous_accuracies = previous_task_accuracies[subtask_idx]
+
+            # 对于每一个任务的每一类别，计算准确率差异
+            for i in range(len(previous_accuracies)):
+                total_fgt_task += (previous_accuracies[i] - current_accuracies[i])
+                total_categories += 1
+
+        # 当前任务的遗忘度是对已学类别准确率差异的平均值
+        task_fgt = total_fgt_task / total_categories  # 每个任务的遗忘度
+        forgetting_rates.append(task_fgt)
+
+    # 计算所有任务的平均遗忘度
+    total_fgt = np.mean(forgetting_rates)
+    return total_fgt
 

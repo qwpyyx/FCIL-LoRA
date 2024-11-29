@@ -65,93 +65,38 @@ class LocalUpdate(object):
                                       collate_fn=self.data_collator)
 
     def update_weights(self, model, old_model, lr_c, lr_e, Waq, Wav, unique_labels):
-        # print(model)
-        # pg = [p for p in model.parameters() if p.requires_grad]
-        # train_name = [name for name, param in model.named_parameters() if param.requires_grad]
 
         model.train()
 
-        # 在 update_weights 中重新构建网络参数列表和优化器
         network_params = []
-        for name, param in model.named_parameters():
-            # 判断哪些层需要更新，只更新 LoRA 部分和确保 requires_grad 为 True
-            if 'lora' in name.lower() and param.requires_grad:
-                lr = lr_e
-                param_group = {'params': [param], 'lr': lr, 'weight_decay': 0.00001}
-                network_params.append(param_group)
+        if self.args.is_peft:
+            for name, param in model.named_parameters():
+                if 'lora' in name.lower() and param.requires_grad:
+                    network_params.append({'params': param, 'lr': self.args.encoders_lr, 'weight_decay': 0.00001})
+        else:
+            for param in model.parameters():
+                network_params.append({'params': param, 'lr': self.args.encoders_lr, 'weight_decay': 0.00001})
 
-        # 使用这些参数构建优化器
         self.optimizer = torch.optim.Adam(network_params)
+        loss_fct = torch.nn.CrossEntropyLoss()
 
         # Local epoch
         for iter in range(self.args.local_ep):
             for batch_idx, batch in enumerate(self.trainloader):
-                input_ids = batch['input_ids'].to(self.args.device)
-                attention_mask = batch['attention_mask'].to(self.args.device)
-                labels = batch['labels'].to(self.args.device)
+                inputs = {
+                'input_ids': batch['input_ids'].to(self.args.device),
+                'attention_mask': batch['attention_mask'].to(self.args.device),
+                'labels': batch['labels'].to(self.args.device)
+                }
                 # decoder_input_ids = labels
                 self.optimizer.zero_grad()
-                logits = model(input_ids=input_ids, attention_mask=attention_mask)
+                logits = model(**inputs)
 
-                # Test
-                # logits = logits[:, self.classes[0]:self.classes[1]]
+                loss_dce = loss_fct(logits, inputs['labels'])
 
-                pred = torch.argmax(logits, dim=1)
 
-                # 计算分类交叉熵损失（假设这是 NLP 分类任务）
-                loss_fct = torch.nn.CrossEntropyLoss()
-                loss_dce = loss_fct(logits, labels)
-
-                # 计算 LoRA 的 L1 正则化损失
-                # l1_loss = torch.tensor(0., dtype=torch.float32, device=self.args.device)
-                # for name, param in model.named_parameters():
-                #     if 'lora' in name.lower() and param.requires_grad:
-                #         l1_loss += torch.norm(param, p=1)
-
-                # 总损失
-                # if old_model is None:
-                #     loss = loss_dce
-                # else:
-                #     # 正交损失部分仍然适用，略作调整
-                #     # ort_loss = torch.tensor(0., dtype=torch.float32, device=self.args.device)
-                #     # for name, param in model.named_parameters():
-                #     #     if 'lora_A' in name.lower() and param.requires_grad:
-                #     #         for pre_param in Waq + Wav:
-                #     #             ort_loss += torch.abs(torch.mm(pre_param, param.T)).sum()
-                #     pass
-                #
-                #     # loss = loss_dce + 0.01 * l1_loss + 0.5 * ort_loss
-                #     loss = loss_dce
 
                 loss_dce.backward()
                 self.optimizer.step()
-
-            # 打印更新后的 lora_A 参数
-            #     for name, param in model.named_parameters():
-            #         if 'lora_B' in name:
-            #             print(f"Value of {name} after optimizer step: {param[0][0].item()}")
-            #             break  # 打印一个 lora_A 层后跳出循环
-            #     for name, param in model.named_parameters():
-            #         if 'lora_A' in name:
-            #             print(f"Value of {name} after optimizer step: {param[0][0].item()}")
-            #             break  # 打印一个 lora_A 层后跳出循环
-                # pass
-                # 记录特征，用于计算每个类别的平均特征
-                # features = hidden_states[:, 0, :]  # 假设取 encoder 最后一层的第一个 token 的隐藏状态作为特征
-                # # 第i个样本的特征，对应的是第lbl类，把他存进去
-                # for i, lbl in enumerate(labels):
-                #     lbl = lbl.item()
-                #     label_feature_dict[lbl].append(features[i].detach().cpu().numpy())
-
-        # 计算每个类别的平均特征
-        # averages = {}
-        # # 对于第cls类的特征值value
-        # for cls, values in label_feature_dict.items():
-        #     # 如果这一类一个样本都没抽到，就没有特征值
-        #     if not values:
-        #         averages[cls] = []
-        #     else:
-        #         average_value = sum(values) / len(values)
-        #         averages[cls] = average_value
 
         return model.state_dict(), None

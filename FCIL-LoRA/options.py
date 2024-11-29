@@ -78,5 +78,14 @@ def args_parser():
     parser.add_argument('--combine', default=False, type=bool, help='Whether to combine the data')
     parser.add_argument('--is_peft', type=int, default=1,
                         help="Whether to use peft such as lora to fine tune model")
+    parser.add_argument('--deepspeed', type=str, default=None, help="DeepSpeed configuration file")
+
+    #Replay
+    parser.add_argument('--old_data_replay_ratio', type=float, default=0.1,
+                        help='sample ratio of old data for replay')
+
+    parser.add_argument('--is_replay', type=int, default=0,
+                        help="Whether to use replay to fine tune model")
+
     args = parser.parse_args()
     return args

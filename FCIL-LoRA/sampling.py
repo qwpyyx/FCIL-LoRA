@@ -136,7 +136,7 @@ def quantity_based_label_skew(dataset, num_users, alpha=6):
     return dict_users
 
 
-def distribution_based_label_skew(dataset, num_users, beta=0.1, min_require_size=10):
+def distribution_based_label_skew(dataset, num_users, beta=0.1, min_require_size=1):
     """
     使用 Dirichlet 分布来模拟非 I.I.D 数据分布，以创建客户端数据划分。
     :param dataset: Dataset 数据集
