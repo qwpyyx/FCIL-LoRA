@@ -75,6 +75,7 @@ class LLMWithLoRA(nn.Module):
             for name, param in self.model.named_parameters():
                 param.requires_grad = False
             for name, param in self.model.named_parameters():
+                # TODO 改成lora_b
                 if "lora" in name.lower():
                     param.requires_grad = True
         else:
@@ -82,7 +83,12 @@ class LLMWithLoRA(nn.Module):
             for param in self.model.parameters():
                 param.requires_grad = True
 
+        # for name, param in self.model.named_parameters():
+        #     if param.requires_grad == True:
+        #         print(name)
+
         self.model.resize_token_embeddings(len(self.tokenizer))
+
 
     # 初始化类别中心（如果需要使用）
     # self.feat_dim = 768
@@ -118,50 +124,12 @@ class LLMWithLoRA(nn.Module):
         hidden_states = outputs.encoder_last_hidden_state  # 提取编码器最后一层的隐藏状态作为特征
         return hidden_states
 
-    # def forward(self, input_ids, attention_mask):
-    #     # 前向传播，获取分类 logits
-    #     outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
-    #     logits = outputs.logits
-    #
-        # if self.return_feature:
-        #     hidden_states = outputs.hidden_states[-1]  # 提取最后一层隐藏状态作为特征
-        #     return logits, hidden_states
-        # else:
-        #     return logits
-
     def forward(self, **inputs):
-        # 前向传播，获取分类 logits
-        # print("Forward pass is called with input_ids shape:", input_ids.shape)
-        # # 打印 LoRA 部分的输出或者检查 LoRA 部分的具体参与
-        # for name, param in self.model.named_parameters():
-        #     if 'lora_B' in name:
-        #         print(f"Using parameter {name}: {param[0][0].item()} before forward pass")
-        #
-        # for name, param in self.model.named_parameters():
-        #     if 'lora_A' in name:
-        #         print(f"Using parameter {name}: {param[0][0].item()} before forward pass")
-
         outputs = self.model(**inputs)
         logits = outputs.logits
-
-        # 检查模型输出和 lora 的状态
-        # print("Logits shape after forward pass:", logits.shape)
-
         return logits
 
-    def forward_from_text(self, texts, mode='train'):
-        # 将文本转为token
-        inputs = self.tokenizer(texts, return_tensors='pt', padding=True, truncation=True, max_length=128)
-        input_ids = inputs['input_ids'].to(self.encoder.device)
-        attention_mask = inputs['attention_mask'].to(self.encoder.device)
 
-        # 前向传播
-        outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
-
-        if self.return_feature:
-            return outputs.logits, outputs.encoder_last_hidden_state
-        else:
-            return outputs.logits
 
     def save_lora_parameters(self, filename: str) -> None:
         r"""保存LoRA的参数，只支持safetensors格式"""
@@ -174,8 +142,6 @@ class LLMWithLoRA(nn.Module):
         self.encoder.from_pretrained(filename)
 
     def switch_lora(self, idx: int):
-        # 在多任务场景中切换不同的 LoRA 设置
-        # 由于模型结构基于 LLMWithLoRA，假设模型中所有 LoRA 层都使用了 get_peft_model
         for name, module in self.encoder.named_modules():
             if hasattr(module, 'lora_id'):
                 module.lora_id = idx

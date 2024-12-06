@@ -16,7 +16,10 @@ from collections import Counter
 from scipy.spatial.distance import cdist
 import torch.nn.functional as F
 from update import DatasetSplit
-
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+import json
 def get_trainable_param_names(model):
     return [name for name, param in model.named_parameters() if param.requires_grad]
 
@@ -84,9 +87,39 @@ def get_dataset(args, train_dataset, m, start, end, task_num):
             train_dataset = train_dataset.filter(lambda example: example['label'] in current_class)
             # 根据beta程度进行标签采样
             user_groups = distribution_based_label_skew(train_dataset, m, beta=args.beta)
-
+    # plot_user_groups_distribution(args, train_dataset, user_groups)
 
     return train_dataset, user_groups
+
+# 假设 user_groups 是一个字典，其中键是用户ID，值是该用户对应的样本
+def plot_user_groups_distribution(args, dataset, user_groups):
+    # 获取所有标签
+    all_labels = np.array(dataset['label'])  # 获取完整数据集的所有标签
+
+    # 统计每个用户组的标签分布
+    user_label_counts = {}
+    for user, indices in user_groups.items():
+        label_counts = {}
+        # 根据索引获取每个用户的数据标签
+        user_labels = all_labels[indices]
+        for label in np.unique(user_labels):
+            label_counts[label] = np.sum(user_labels == label)
+        user_label_counts[user] = label_counts
+
+    # 转换为矩阵，行表示用户，列表示标签
+    unique_labels = list(np.unique(all_labels))
+    label_matrix = np.array(
+        [[user_label_counts[user].get(label, 0) for label in unique_labels] for user in user_label_counts])
+
+    # 绘制热图
+    plt.figure(figsize=(12, 8))
+    sns.heatmap(label_matrix, annot=True, fmt="d", cmap="YlGnBu", xticklabels=unique_labels,
+                yticklabels=user_label_counts.keys())
+    title = 'Label Distribution Across Users when beta = {}'.format(args.beta)
+    plt.title(title)
+    plt.xlabel("Labels")
+    plt.ylabel("Users")
+    plt.show()
 
 # def split_single_dataset(args, class_order):
 #     nb_classes = args.total_classes
@@ -133,7 +166,18 @@ def split_single_dataset(args, class_order):
 
     return mask
 
+def load_json(file_name, encoding="utf-8"):
+    with open(file_name, 'r', encoding=encoding) as f:
+        content = json.load(f)
+    return content
 
+def dump_json(obj, file_name, encoding="utf-8", default=None):
+    if default is None:
+        with open(file_name, 'w', encoding=encoding) as fw:
+            json.dump(obj, fw)
+    else:
+        with open(file_name, 'w', encoding=encoding) as fw:
+            json.dump(obj, fw, default=default)
 
 # def compute_weight(centers_list, feature_list, epsilon=1e-6):
 #     weight = []
@@ -251,10 +295,9 @@ def compute_weight(centers_list, feature_list, epsilon=1e-6, device='cuda'):
     return weight
 
 
-def average_weights(weights_list, model, classes, niid_type, backbone_weight, numclass, device='cuda'):
+def average_weights(weights_list, model, classes, niid_type, backbone_weight, numclass):
 
     trainable_params = get_trainable_param_names(model)
-
 
     avg_weights = collections.OrderedDict()
     weight_names = weights_list[0].keys()
@@ -265,25 +308,90 @@ def average_weights(weights_list, model, classes, niid_type, backbone_weight, nu
                 avg_weights[name] = model.state_dict()[name]
         else:
             # 确保所有张量在同一设备上
-            aggregated_weight_tensor = torch.stack([w[name].to(device) * backbone_weight[i] for i, w in enumerate(weights_list)]).sum(dim=0)
+            aggregated_weight_tensor = torch.stack([w[name] * backbone_weight[i] for i, w in enumerate(weights_list)]).sum(dim=0)
             avg_weights[name] = aggregated_weight_tensor
 
     return avg_weights
 
 
-def global_server(model, global_model):
+# def average_weights(weights_list, model, classes, niid_type, backbone_weight, numclass, device='cuda'):
+#     # 获取所有可训练的参数名
+#     trainable_params = get_trainable_param_names(model)
+#
+#     avg_weights = collections.OrderedDict()
+#     weight_names = weights_list[0].keys()
+#
+#     for name in weight_names:
+#         if name not in trainable_params:
+#             if name in model.state_dict():
+#                 avg_weights[name] = model.state_dict()[name]
+#         else:
+#             # 对于可训练的权重，按权重加权聚合
+#             aggregated_weight_tensor = torch.zeros_like(weights_list[0][name], device=device)
+#
+#             # 通过加权平均来聚合权重
+#             for i, w in enumerate(weights_list):
+#                 aggregated_weight_tensor += w[name].to(device) * backbone_weight[i]
+#
+#             avg_weights[name] = aggregated_weight_tensor  # 权重加权平均
+#
+#     return avg_weights
+
+def global_server(model, global_model, args):
     with torch.no_grad():
         for name, param in model.named_parameters():
-            if 'lora' in name.lower() or 'classifier' in name:
+            if args.is_peft:
+                if 'lora' in name.lower():
+                    if name in global_model.state_dict():
+                        if param.size() == global_model.state_dict()[name].size():
+                            # 确保数据被拷贝到正确的设备
+                            global_model.state_dict()[name].copy_(param.data.to(global_model.state_dict()[name].device))
+                        else:
+                            print(f"Skipping parameter '{name}' due to size mismatch: "
+                                  f"Model size {param.size()} vs Global model size {global_model.state_dict()[name].size()}")
+                    else:
+                        print(f"Skipping parameter '{name}' due to size mismatch: ")
+            else:
                 if name in global_model.state_dict():
-                    # 检查模型和全局模型之间参数尺寸是否一致
                     if param.size() == global_model.state_dict()[name].size():
+                        # 确保数据被拷贝到正确的设备
                         global_model.state_dict()[name].copy_(param.data.to(global_model.state_dict()[name].device))
                     else:
-                        print(f"跳过参数 '{name}'，因为尺寸不匹配："
-                              f"模型参数尺寸 {param.size()} vs 全局模型参数尺寸 {global_model.state_dict()[name].size()}")
+                        print(f"Skipping parameter '{name}' due to size mismatch: "
+                              f"Model size {param.size()} vs Global model size {global_model.state_dict()[name].size()}")
+
     return global_model
 
+# def global_server(model, global_model, args):
+#     """
+#     更新全局模型的权重，依据 args.is_peft 来判断更新 LoRA 层还是全量更新
+#     """
+#     with torch.no_grad():
+#         print(f"global_model.named_parameters(): {list(global_model.named_parameters())}")  # 查看结构
+#         for global_param, (name, param) in zip(global_model.named_parameters(), model.named_parameters()):
+#             # 确保global_param是parameter类型
+#             if isinstance(global_param, tuple):
+#                 global_param = global_param[1]  # 解包tuple，只取参数部分
+#             print(f"param type: {type(param)}, global_param type: {type(global_param)}")
+#
+#             # 判断是否只更新 LoRA 层还是全量更新
+#             if args.is_peft:
+#                 # 只更新 LoRA 层
+#                 if 'lora' in name.lower() or 'classifier' in name.lower():
+#                     if param.size() == global_param.size():
+#                         global_param.data.copy_(param.data)
+#                     else:
+#                         print(f"Skipping parameter '{name}' due to size mismatch: "
+#                               f"Model size {param.size()} vs Global model size {global_param.size()}")
+#             else:
+#                 # 全量更新
+#                 if param.size() == global_param.size():
+#                     global_param.data.copy_(param.data)
+#                 else:
+#                     print(f"Skipping parameter '{name}' due to size mismatch: "
+#                           f"Model size {param.size()} vs Global model size {global_param.size()}")
+#
+#     return global_model
 
 
 # def global_server(model, global_model, Waq, Wav, Wbq, Wbv, current_task):
@@ -393,6 +501,48 @@ def initialize_datasets(self):
         )
     else:
         print("Warning: valid_set not found. Validation loader is not initialized.")
+
+def compare_model_params(model1, model2):
+    for param1, param2 in zip(model1.parameters(), model2.parameters()):
+        if not torch.allclose(param1.data, param2.data, atol=1e-5):
+            return False
+    return True
+
+def compare_model_and_weights(model, weights_dict, threshold=1e-6):
+    """
+    比较模型的权重和一个 OrderedDict 格式的权重字典。
+
+    参数:
+    - model (torch.nn.Module): 要比较的 PyTorch 模型。
+    - weights_dict (OrderedDict): 以 OrderedDict 格式存储的权重。
+    - threshold (float): 判断权重是否相等的阈值。
+    """
+    model_weights = model.state_dict()
+
+    # 确保模型权重和给定的权重字典都在同一设备上（CPU 或 GPU）
+    device = next(iter(model_weights.values())).device
+    if not all(weight.device == device for weight in weights_dict.values()):
+        weights_dict = {k: v.to(device) for k, v in weights_dict.items()}
+
+    all_equal = True
+    for key in model_weights.keys():
+        if key not in weights_dict:
+            print(f"Key {key} missing in weights_dict")
+            all_equal = False
+        else:
+            model_weight = model_weights[key]
+            given_weight = weights_dict[key]
+
+            # 由于浮点数精度问题，直接比较可能不准确，因此计算差异并检查是否小于阈值
+            diff = torch.abs(model_weight - given_weight).max().item()
+            if diff > threshold:
+                print(f"Difference in key {key}: {diff}")
+                all_equal = False
+
+    if all_equal:
+        print("All weights are equal within the given threshold.")
+    else:
+        print("Some weights are different.")
 
 
 def compute_forgetting_rate(task_accuracies, previous_task_accuracies):

@@ -12,6 +12,9 @@ import json
 import pandas as pd
 from replay import ExperienceReplay
 import math
+import matplotlib.pyplot as plt
+import pickle
+from data import get_dataset
 
 
 class vitlora:
@@ -22,10 +25,17 @@ class vitlora:
         self.args = args
         self.epochs = args.local_ep
         self.model = model
-        self.global_model = model
+        self.global_model = copy.deepcopy(model)
+        # self.global_model = LLMWithLoRA(
+        #                                 modelname=self.args.model_path,
+        #                                 is_peft=self.args.is_peft,
+        #                                 num_classes=self.args.total_classes,
+        #                                 r=self.args.r,
+        #                                 lora_layer=["query", "value"]
+        #                                 )
         self.numclass = args.fg_nc
         self.task_size = task_size
-        self.device = device
+        self.device = self.args.device
 
         self.task_accuracies = []  # 保存每个任务结束后的最佳准确率
         self.previous_task_accuracies = []  # 保存每次任务开始前对所有已学任务的准确率
@@ -34,7 +44,7 @@ class vitlora:
         self._load_datasets()
 
         # Replay
-        self.experience_replay = ExperienceReplay(max_size=50, old_data_ratio=0.1)
+        self.experience_replay = ExperienceReplay(max_size=50, old_data_ratio=self.args.old_data_replay_ratio)
 
         # 数据转换
         self.data_collator = DataCollatorWithPadding(tokenizer=self.global_model.tokenizer)
@@ -47,15 +57,15 @@ class vitlora:
         self.W_bv = []
 
     def _load_datasets(self):
-        """加载数据集并进行预处理"""
         dataset = load_dataset('csv',
                                data_files={'train': f"{self.data_dir}/train.csv",
                                            'test': f"{self.data_dir}/test.csv"},
                                delimiter=',')  # 确保读取CSV格式，指定分隔符
-
         # 重命名列
         dataset = dataset.rename_column(original_column_name='text', new_column_name='input_text')
         dataset = dataset.rename_column(original_column_name='category', new_column_name='label')
+
+        #dataset = get_dataset("fewrel", tokenizer=None, args=self.args)
 
         # 分割训练集和验证集
         self.train_set = dataset['train']
@@ -170,6 +180,7 @@ class vitlora:
         # 将模型和设备准备好
         self.model.train()
         self.model.to(self.device)
+
 
     def raw_train(self, current_task, old_class=0, tf_writer=None, logger_file=None):
         """集中式增量式训练的实现"""
@@ -444,8 +455,6 @@ class vitlora:
             collate_fn=self.data_collator
         )
 
-        # start_class, end_class = self.classes
-
         current_test_set = self.preprocessed_test_set.filter(
             lambda example: self.classes[0] <= example['label'] < self.classes[1])
         test_dataset = DatasetSplit(current_test_set, list(range(len(current_test_set))))
@@ -454,8 +463,10 @@ class vitlora:
             test_dataset, batch_size=self.args.local_bs, shuffle=True,
             num_workers=0, collate_fn=self.data_collator
         )
+
         self.list_of_individual_testloader.append(individual_test_loader)
 
+        # 训好模型后，对之前的所有任务单独测试当前全局模型对之前任务的性能
         if current_task > 0:
             previous_acc = []
             for i, test_loader in enumerate(self.list_of_individual_testloader):
@@ -471,36 +482,28 @@ class vitlora:
         self.model.to(self.device)
         self.global_model.to(self.device)
 
-    def train(self, current_task, old_class=0, tf_writer=None, logger_file=None):
+    def train(self, current_task, logger_file=None):
         bst_acc = -1
         description = "Global inference acc={:.4f}% loss={:.2f}, best_acc = {:.2f}%"
         # local_weights = []
-        center_lr = self.args.centers_lr
+        # center_lr = self.args.centers_lr
         encoder_lr = self.args.encoders_lr
 
+        # test_en = []
         # best_acc = 0.0
         # early_stopping_patience = 10
         # current_patience = 0
 
         for epoch in tqdm(range(self.args.epochs)):
             local_weights = []
-            # count_num= [[] for i in range(0, self.task_size)]
-            # feature_list = [[] for i in range(0, self.task_size)]
             sample_num = []
             m = self.args.client_local
-            # 每一轮随机从num_users中选取m个客户端参与训练
             idxs_users = np.random.choice(range(self.args.num_users), m, replace=False)
+
             # load dataset and user groups
             train_dataset, user_groups = get_dataset(self.args, train_dataset=self.train_set, m=m,
                                                      start=self.classes[0], end=self.classes[1],
                                                      task_num=self.task_size)
-            # 确保筛选后的数据集不为空
-            assert len(train_dataset) > 0, "Filtered train dataset is empty. Please check the filtering criteria."
-
-            # 检查用户组和选择的客户端数量是否一致
-            if len(user_groups) != len(idxs_users):
-                raise ValueError(f"Mismatch in the number of users and selected indices for remapping. "
-                                 f"User groups: {len(user_groups)}, Selected clients: {len(idxs_users)}")
 
             # 使用映射前先对键值对进行排序，确保匹配的一致性
             sorted_user_keys = sorted(user_groups.keys())
@@ -510,9 +513,6 @@ class vitlora:
             user_groups_mapped = {}
             for old_key, new_key in zip(sorted_user_keys, sorted_idxs_users):
                 user_groups_mapped[new_key] = user_groups[old_key]
-
-            # 打印映射结果以便调试和验证
-            # print(f"User groups mapping: {user_groups_mapped}")
 
             # 更新用户组
             user_groups = user_groups_mapped
@@ -527,27 +527,54 @@ class vitlora:
                                           idxs=local_data_indices, tokenizer=self.global_model.tokenizer
                                           )
 
-                unique_labels = set(train_dataset['label'])
-
                 # Local Epoch
                 w, _ = local_model.update_weights(
-                    model=copy.deepcopy(self.model), old_model=copy.deepcopy(self.old_model), lr_c=center_lr,
-                    lr_e=encoder_lr,
-                    Waq=self.W_aq, Wav=self.W_av, unique_labels=unique_labels)
+                    model=copy.deepcopy(self.model), lr=encoder_lr)
 
                 # local model
                 local_weights.append(copy.deepcopy(w))
 
             average_weight = [i / sum(sample_num) for i in sample_num]
 
-            # # update global weights
-            # self.model.load_state_dict(self.model)
-            self.model.load_state_dict(average_weights(local_weights, self.model, self.classes,
-                                                       self.args.niid_type, average_weight, self.numclass))
-            self.global_model = global_server(self.model, self.global_model)
-            # self.model_ave.load_state_dict(average_weights2(local_weights, self.model))
+            # # 使用此函数检查self.global_model是否更新
+            # if compare_model_params(self.model, self.global_model):
+            #     print("global_model and model are identical!")
+            # else:
+            #     print("global_model and model have different parameters.")
+
+
+            agg_weights = average_weights(local_weights, self.model, self.classes,
+                                                       self.args.niid_type, average_weight, self.numclass)
+
+            # compare_model_and_weights(self.model, agg_weights)
+
+
+            self.model.load_state_dict(agg_weights)
+
+            # if compare_model_params(self.model, self.global_model):
+            #     print("global_model and model are identical!")
+            # else:
+            #     print("global_model and model have different parameters.")
+            #
+            #
+            #
+            #
+
+
+
+            self.global_model = global_server(self.model, self.global_model, self.args)
+
+            # if compare_model_params(self.model, self.global_model):
+            #     print("global_model and model are identical!")
+            # else:
+            #     print("global_model and model have different parameters.")
+
+
 
             test_acc, test_loss = self.inference(self.global_model, self.test_loader)
+
+            # Use decay learning rate
+            encoder_lr = self.args.encoders_lr * (1 + math.cos(epoch * math.pi / self.args.epochs)) / 2
 
             output_log = 'After {} global rounds, Test acc: {}, inference loss: {}'.format(
                 epoch + 1, test_acc, test_loss)
@@ -558,6 +585,11 @@ class vitlora:
             bst_acc = max(bst_acc, test_acc)
 
         print(description.format(test_acc, test_loss, bst_acc))
+
+        if logger_file:
+            output_log = f'Task {current_task} - Test acc: {test_acc:.4f}, Test loss: {test_loss:.4f}'
+            logger_file.write(output_log + '\n')
+            logger_file.flush()
 
     def afterTrain(self, current_task, logger_file):
         # 更新类别数量

@@ -21,8 +21,8 @@ def args_parser():
                         help="the number of local epochs: E")
     parser.add_argument('--local_bs', type=int, default=10,
                         help="local batch size: B")
-    parser.add_argument('--centers_lr', type=float, default=0.003,
-                        help='learning rate')
+    parser.add_argument('--centers_lr', type=float, default=1e-4,
+                        help='learning rate of centers')
     parser.add_argument('--encoders_lr', type=float, default=1e-4,
                         help='learning rate')
     parser.add_argument('--momentum', type=float, default=0.5,

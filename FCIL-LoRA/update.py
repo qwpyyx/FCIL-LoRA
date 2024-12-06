@@ -64,7 +64,8 @@ class LocalUpdate(object):
         self.trainloader = DataLoader(self.client_dataset, batch_size=self.args.local_bs, shuffle=True, num_workers=0,
                                       collate_fn=self.data_collator)
 
-    def update_weights(self, model, old_model, lr_c, lr_e, Waq, Wav, unique_labels):
+
+    def update_weights(self, model, lr):
 
         model.train()
 
@@ -72,16 +73,17 @@ class LocalUpdate(object):
         if self.args.is_peft:
             for name, param in model.named_parameters():
                 if 'lora' in name.lower() and param.requires_grad:
-                    network_params.append({'params': param, 'lr': self.args.encoders_lr, 'weight_decay': 0.00001})
+                    network_params.append({'params': param, 'lr': lr, 'weight_decay': 0.00001})
         else:
             for param in model.parameters():
-                network_params.append({'params': param, 'lr': self.args.encoders_lr, 'weight_decay': 0.00001})
+                network_params.append({'params': param, 'lr': lr, 'weight_decay': 0.00001})
 
-        self.optimizer = torch.optim.Adam(network_params)
+        optimizer = torch.optim.Adam(network_params)
         loss_fct = torch.nn.CrossEntropyLoss()
 
         # Local epoch
         for iter in range(self.args.local_ep):
+            lee =[]
             for batch_idx, batch in enumerate(self.trainloader):
                 inputs = {
                 'input_ids': batch['input_ids'].to(self.args.device),
@@ -89,14 +91,19 @@ class LocalUpdate(object):
                 'labels': batch['labels'].to(self.args.device)
                 }
                 # decoder_input_ids = labels
-                self.optimizer.zero_grad()
+                model.zero_grad()
                 logits = model(**inputs)
 
                 loss_dce = loss_fct(logits, inputs['labels'])
-
-
-
+                lee.append(loss_dce.item())
                 loss_dce.backward()
-                self.optimizer.step()
+
+                # 打印梯度信息，查看是否存在问题
+                # for name, param in model.named_parameters():
+                #     if param.grad is not None:
+                #         print(
+                #             f"Gradients for {name}: max={param.grad.max()}, min={param.grad.min()}, mean={param.grad.mean()}")
+
+                optimizer.step()
 
         return model.state_dict(), None

@@ -80,8 +80,8 @@ def nlp_iid(dataset, num_users):
     dict_users, all_idxs = {}, [i for i in range(len(dataset))]
 
     for i in range(num_users):
-        dict_users[i] = set(np.random.choice(all_idxs, num_items, replace=False))
-        all_idxs = list(set(all_idxs) - dict_users[i])
+        dict_users[i] = list(np.random.choice(all_idxs, num_items, replace=False))  # 将set改为list
+        all_idxs = list(set(all_idxs) - set(dict_users[i]))  # 确保不重复采样
 
     return dict_users
 

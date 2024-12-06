@@ -36,6 +36,27 @@ def prepare_folders(cur_path, keyname):
             os.makedirs(folder, exist_ok=True)
 
 
+def initialize_model(args):
+    # 创建模型
+    model = LLMWithLoRA(
+        modelname=args.model_path,
+        is_peft=args.is_peft,
+        num_classes=args.total_classes,
+        r=args.r,
+        lora_layer=["query", "value"]
+    )
+    model = model.to(args.device)
+
+    if args.deepspeed:
+        model, optimizer, _, _ = deepspeed.initialize(args=args, model=model)
+
+    # 分布式训练
+    # if dist.is_initialized():
+    #     model = DDP(model, device_ids=[args.device])
+
+    return model
+
+
 if __name__ == '__main__':
 
     args = args_parser()
@@ -44,24 +65,34 @@ if __name__ == '__main__':
     args.type = 'iid' if args.iid == 1 else 'non-iid'
 
     if args.mode == 'centralized':
-        keyname = '/logs-Centralized' + '/{}'.format(args.dataset)
+        keyname = '/logs-Centralized-1206' + '/{}'.format(args.dataset)
         if args.is_peft:
             nam = "lora"
             args.store_name = '_'.join(
-                [args.dataset, args.model, args.mode, nam, 'epoch-' + str(args.epochs), 'lr-' + str(args.encoders_lr)])
+                [args.dataset, args.model, args.mode, nam, 'epoch-' + str(args.epochs), 'lr-' + str(args.encoders_lr),
+                 'r-' + str(args.r)])
         else:
             nam = "full-finetune"
             args.store_name = '_'.join(
-                [args.dataset, args.model, args.mode, nam, 'epoch-' + str(args.epochs), 'lr-' + str(args.encoders_lr),
-                 'r-' + str(args.r)])
+                [args.dataset, args.model, args.mode, nam, 'epoch-' + str(args.epochs), 'lr-' + str(args.encoders_lr)
+                 ])
     elif args.mode == "federated":
-        keyname = '/logs-Federated' + '/{}'.format(args.dataset)
+        if args.type == 'iid':
+            keyname = '/logs-Federated' + "/iid" + '/{}'.format(args.dataset)
+        else:
+            keyname = '/logs-Federated-1206' + "/non-iid" + '/{}'.format(args.dataset)
         if args.is_peft:
             nam = "FCL-lora"
-            args.store_name = '_'.join(
-                [args.dataset, args.model, args.mode, args.type, nam,
-                 'epoch-' + str(args.epochs), 'lr-' + str(args.encoders_lr),
-                 'r-' + str(args.r), "beta-" + str(args.beta)])
+            if args.type == 'iid':
+                args.store_name = '_'.join(
+                    [args.dataset, args.model, args.mode, args.type, nam,
+                     'epoch-' + str(args.epochs), 'lr-' + str(args.encoders_lr),
+                     'r-' + str(args.r), "iid"])
+            else:
+                args.store_name = '_'.join(
+                    [args.dataset, args.model, args.mode, args.type, nam,
+                     'epoch-' + str(args.epochs), 'lr-' + str(args.encoders_lr),
+                     'r-' + str(args.r), "beta-" + str(args.beta)])
         else:
             nam = "FCL-full"
             args.store_name = '_'.join([args.dataset, args.model, args.mode,
@@ -75,19 +106,8 @@ if __name__ == '__main__':
 
     # BUILD MODEL
     file_name = args.store_name
-    class_set = list(range(args.total_classes))
-
-    model = LLMWithLoRA(modelname=args.model_path,  # 可以选择适合的LLM，例如't5-base'或其他预训练模型
-                        is_peft=args.is_peft,
-                        num_classes=args.total_classes,
-                        r=args.r,
-                        lora_layer=["query", "value"])  # 指定 LoRA 作用的层
+    model = initialize_model(args)
     model = model.to(args.device)
-
-    # DeepSpeed初始化
-    if args.deepspeed:
-        model, optimizer, _, _ = deepspeed.initialize(args=args, model=model)
-
     # --------------------
     if args.mode == 'federated':
 
@@ -110,13 +130,13 @@ if __name__ == '__main__':
 
             filename = 'log_task_raw{}.txt'.format(i)
             logger_file = open(os.path.join(cur_path + keyname, args.store_name, filename), 'w')
-            tf_writer = SummaryWriter(log_dir=os.path.join(cur_path + keyname, args.store_name))
+            # tf_writer = SummaryWriter(log_dir=os.path.join(cur_path + keyname, args.store_name))
 
             global_model.beforeTrain(i, logger_file=logger_file)
             if global_model.all_tasks_completed:
                 break
 
-            global_model.train(i, old_class=old_class, tf_writer=tf_writer, logger_file=logger_file)
+            global_model.train(i, logger_file=logger_file)
             global_model.afterTrain(i, logger_file=logger_file)
 
         # 计算 ACC 和 FGT
