@@ -86,6 +86,9 @@ def args_parser():
 
     parser.add_argument('--is_replay', type=int, default=0,
                         help="Whether to use replay to fine tune model")
+    # NonCL
+    parser.add_argument('--is_CL', type=int, default=1,
+                        help="Whether to use continuous learning")
 
     args = parser.parse_args()
     return args

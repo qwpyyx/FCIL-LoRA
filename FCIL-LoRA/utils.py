@@ -20,14 +20,20 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 import json
+import pandas as pd
+from datasets import concatenate_datasets, Dataset
+import pickle
+
+
 def get_trainable_param_names(model):
     return [name for name, param in model.named_parameters() if param.requires_grad]
+
 
 def get_frozen_param_names(model):
     return [name for name, param in model.named_parameters() if not param.requires_grad]
 
-def build_continual_dataset(args, class_order):
 
+def build_continual_dataset(args, class_order):
     class_mask = split_single_dataset(args, class_order)
 
     return class_mask
@@ -60,16 +66,17 @@ def get_trainand_test_dataset(args):
     #                               transform=trans_test)     
 
     train_dataset = iCIFAR100(data_dir, train=True, download=True,
-                                transform=trans_train)
+                              transform=trans_train)
 
     test_dataset = iCIFAR100(data_dir, train=False, download=True,
-                                test_transform=trans_test)  
+                             test_transform=trans_test)
     all_classes = [0, args.total_classes]
     test_dataset.getTestData(all_classes)
     train_dataset.getTrainData(all_classes)
     return train_dataset, test_dataset
 
-def get_dataset(args, train_dataset, m, start, end, task_num):
+
+def get_dataset_noniid(args, train_dataset, m, start, end, task_num):
     # sample training data amongst users
     if args.iid:
         current_class = random.sample([x for x in range(start, end)], task_num)
@@ -90,6 +97,7 @@ def get_dataset(args, train_dataset, m, start, end, task_num):
     # plot_user_groups_distribution(args, train_dataset, user_groups)
 
     return train_dataset, user_groups
+
 
 # 假设 user_groups 是一个字典，其中键是用户ID，值是该用户对应的样本
 def plot_user_groups_distribution(args, dataset, user_groups):
@@ -120,6 +128,7 @@ def plot_user_groups_distribution(args, dataset, user_groups):
     plt.xlabel("Labels")
     plt.ylabel("Users")
     plt.show()
+
 
 # def split_single_dataset(args, class_order):
 #     nb_classes = args.total_classes
@@ -166,10 +175,12 @@ def split_single_dataset(args, class_order):
 
     return mask
 
+
 def load_json(file_name, encoding="utf-8"):
     with open(file_name, 'r', encoding=encoding) as f:
         content = json.load(f)
     return content
+
 
 def dump_json(obj, file_name, encoding="utf-8", default=None):
     if default is None:
@@ -178,6 +189,7 @@ def dump_json(obj, file_name, encoding="utf-8", default=None):
     else:
         with open(file_name, 'w', encoding=encoding) as fw:
             json.dump(obj, fw, default=default)
+
 
 # def compute_weight(centers_list, feature_list, epsilon=1e-6):
 #     weight = []
@@ -288,7 +300,8 @@ def compute_weight(centers_list, feature_list, epsilon=1e-6, device='cuda'):
             softmax_data = torch.nn.functional.softmax(normalized_data / 0.2, dim=0)
         else:
             # 如果没有非空的特征，则返回均匀权重
-            softmax_data = torch.tensor([1.0 / len(centers_list)] * len(centers_list), dtype=torch.float64, device=device)
+            softmax_data = torch.tensor([1.0 / len(centers_list)] * len(centers_list), dtype=torch.float64,
+                                        device=device)
 
         weight.append(softmax_data.cpu())
 
@@ -296,7 +309,6 @@ def compute_weight(centers_list, feature_list, epsilon=1e-6, device='cuda'):
 
 
 def average_weights(weights_list, model, classes, niid_type, backbone_weight, numclass):
-
     trainable_params = get_trainable_param_names(model)
 
     avg_weights = collections.OrderedDict()
@@ -308,7 +320,8 @@ def average_weights(weights_list, model, classes, niid_type, backbone_weight, nu
                 avg_weights[name] = model.state_dict()[name]
         else:
             # 确保所有张量在同一设备上
-            aggregated_weight_tensor = torch.stack([w[name] * backbone_weight[i] for i, w in enumerate(weights_list)]).sum(dim=0)
+            aggregated_weight_tensor = torch.stack(
+                [w[name] * backbone_weight[i] for i, w in enumerate(weights_list)]).sum(dim=0)
             avg_weights[name] = aggregated_weight_tensor
 
     return avg_weights
@@ -361,6 +374,7 @@ def global_server(model, global_model, args):
                               f"Model size {param.size()} vs Global model size {global_model.state_dict()[name].size()}")
 
     return global_model
+
 
 # def global_server(model, global_model, args):
 #     """
@@ -443,12 +457,12 @@ def global_server(model, global_model, args):
 #     return global_model
 
 def average_weights2(weights_list, model):
-     avg_weights = collections.OrderedDict()
-     weight_names = weights_list[0].keys()
-     for name in weight_names:
-         avg_weights[name] = torch.stack([w[name] for w in weights_list]).mean(dim=0)
+    avg_weights = collections.OrderedDict()
+    weight_names = weights_list[0].keys()
+    for name in weight_names:
+        avg_weights[name] = torch.stack([w[name] for w in weights_list]).mean(dim=0)
 
-     return avg_weights
+    return avg_weights
 
 
 def exp_details(args):
@@ -457,15 +471,16 @@ def exp_details(args):
     print(f'    Optimizer : {args.optimizer}')
     print(f'    Learning  : {args.encoders_lr}')
     print(f'    Global Rounds   : {args.epochs}\n')
-
-    print('    Federated parameters:')
-    if args.iid:
-        print('    IID')
-    else:
-        print('    Non-IID')
-    print(f'    Users in one epoch  : {args.client_local}')
-    print(f'    Local Batch size   : {args.local_bs}')
-    print(f'    Local Epochs       : {args.local_ep}\n')
+    if args.mode == 'federated':
+        print('    Federated parameters:')
+        if args.iid:
+            print('    IID')
+        else:
+            print('    Non-IID')
+        print(f'    Users in one epoch  : {args.client_local}')
+        print(f'    Local Batch size   : {args.local_bs}')
+        print(f'    Local Epochs       : {args.local_ep}\n')
+        print(f'    Beta               : {args.beta}')
     return
 
 
@@ -502,11 +517,13 @@ def initialize_datasets(self):
     else:
         print("Warning: valid_set not found. Validation loader is not initialized.")
 
+
 def compare_model_params(model1, model2):
     for param1, param2 in zip(model1.parameters(), model2.parameters()):
         if not torch.allclose(param1.data, param2.data, atol=1e-5):
             return False
     return True
+
 
 def compare_model_and_weights(model, weights_dict, threshold=1e-6):
     """
@@ -574,3 +591,133 @@ def compute_forgetting_rate(task_accuracies, previous_task_accuracies):
     total_fgt = np.mean(forgetting_rates)
     return total_fgt
 
+def compute_final_acc(args, centralized_trainer):
+    acc = 0
+    total_weight = 0
+    # 计算 ACC 和 FGT
+    task_num = len(centralized_trainer.task_accuracies)
+    # 加权计算所有任务的准确率
+    for i in range(task_num):
+        # 计算每个任务的类别数
+        if i == 0:
+            task_weight = args.fg_nc
+        else:
+            task_weight = centralized_trainer.task_size
+
+        task_acc = sum(centralized_trainer.task_accuracies[i]) / len(
+            centralized_trainer.task_accuracies[i])  # 当前任务的准确率
+        acc += task_acc * task_weight
+        total_weight += task_weight
+
+    # 最终加权准确率
+    acc /= total_weight
+    return acc
+
+def _load_clinc150_data(clinc150_data_path):
+    """加载并格式化 clinc150 数据"""
+    # 读取 JSON 文件
+    with open(clinc150_data_path, 'r') as f:
+        clinc150_data = json.load(f)
+
+    # 提取 train 和 test 数据
+    clinc150_train = _convert_clinc150_to_dataframe(clinc150_data.get('train', []))
+    clinc150_test = _convert_clinc150_to_dataframe(clinc150_data.get('test', []))
+    return clinc150_train, clinc150_test
+
+
+def _convert_clinc150_to_dataframe(data):
+    """将 clinc150 数据转换为 DataFrame 格式，保留字符串标签"""
+    if not data:
+        return pd.DataFrame(columns=['input_text', 'label'])
+    texts, labels = zip(*data)  # 解压数据为文本和标签
+    return pd.DataFrame({'input_text': texts, 'label': labels})  # 直接保留标签字符串
+
+
+def _merge_datasets(dataset, clinc_df):
+    """合并 datasets.Dataset 和 clinc150 DataFrame"""
+    # 转换 clinc_df 为 datasets.Dataset
+    clinc_dataset = Dataset.from_pandas(clinc_df)
+
+    # 检查两者的列名是否一致，如果不一致需要统一
+    for column in clinc_dataset.column_names:
+        if column not in dataset.column_names:
+            raise ValueError(f"列 {column} 不在主数据集列中，请检查列名一致性！")
+    return concatenate_datasets([dataset, clinc_dataset])
+
+
+def _load_fewrel_data(fewrel_data_path):
+    """加载并格式化 FewRel 数据"""
+    with open(fewrel_data_path, 'rb') as f:
+        datas = pickle.load(f)
+
+        # 获取训练集、验证集和测试集
+        train_dataset, val_dataset, test_dataset = datas
+
+        # 处理训练集数据
+        train_texts = []
+        train_labels = []
+        for group_id, group in enumerate(train_dataset):
+            for sample in group:  # 每个group是一个包含420个样本的列表
+                train_texts.append(sample['text'])
+                train_labels.append(sample['semantic_label'])
+
+        # 处理测试集数据
+        test_texts = []
+        test_labels = []
+        for group_id, group in enumerate(test_dataset):
+            for sample in group:  # 每个group是一个包含420个样本的列表
+                test_texts.append(sample['text'])
+                test_labels.append(sample['semantic_label'])
+
+        # 创建训练集和测试集的字典
+        train_data = {
+            'text': train_texts,
+            'labels': train_labels
+        }
+        test_data = {
+            'text': test_texts,
+            'labels': test_labels
+        }
+
+        # 将字典转换为 Dataset 对象
+        train_data = Dataset.from_dict(train_data)
+        test_data = Dataset.from_dict(test_data)
+
+        return train_data, test_data
+
+def configure_logging(args):
+    if args.mode == 'centralized':
+        keyname = '/logs-Centralized-1209' + '/{}'.format(args.dataset)
+        if args.is_peft:
+            nam = "lora"
+            args.store_name = '_'.join(
+                [args.dataset, args.model, args.mode, nam, 'epoch-' + str(args.epochs), 'lr-' + str(args.encoders_lr),
+                 'r-' + str(args.r)])
+        else:
+            nam = "full-finetune"
+            args.store_name = '_'.join(
+                [args.dataset, args.model, args.mode, nam, 'epoch-' + str(args.epochs), 'lr-' + str(args.encoders_lr)
+                 ])
+    elif args.mode == "federated":
+        if args.type == 'iid':
+            keyname = '/logs-Federated' + "/iid" + '/{}'.format(args.dataset)
+        else:
+            keyname = '/logs-Federated-1206' + "/non-iid" + '/{}'.format(args.dataset)
+        if args.is_peft:
+            nam = "FCL-lora"
+            if args.type == 'iid':
+                args.store_name = '_'.join(
+                    [args.dataset, args.model, args.mode, args.type, nam,
+                     'epoch-' + str(args.epochs), 'lr-' + str(args.encoders_lr),
+                     'r-' + str(args.r), "iid"])
+            else:
+                args.store_name = '_'.join(
+                    [args.dataset, args.model, args.mode, args.type, nam,
+                     'epoch-' + str(args.epochs), 'lr-' + str(args.encoders_lr),
+                     'r-' + str(args.r), "beta-" + str(args.beta)])
+        else:
+            nam = "FCL-full"
+            args.store_name = '_'.join([args.dataset, args.model, args.mode,
+                                        args.type, nam, 'epoch-' + str(args.epochs), 'lr-' + str(args.encoders_lr),
+                                        "beta-" + str(args.beta)])
+    return keyname

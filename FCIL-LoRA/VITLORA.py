@@ -7,7 +7,6 @@ from tqdm import tqdm
 from CPN import *
 from transformers import DataCollatorWithPadding
 from datasets import load_dataset
-from datasets import concatenate_datasets, Dataset
 import json
 import pandas as pd
 from replay import ExperienceReplay
@@ -15,7 +14,7 @@ import math
 import matplotlib.pyplot as plt
 import pickle
 from data import get_dataset
-
+from utils import _load_clinc150_data, _load_fewrel_data
 
 class vitlora:
     def __init__(self, args, file_name, model, task_size, device):
@@ -57,74 +56,73 @@ class vitlora:
         self.W_bv = []
 
     def _load_datasets(self):
-        dataset = load_dataset('csv',
-                               data_files={'train': f"{self.data_dir}/train.csv",
-                                           'test': f"{self.data_dir}/test.csv"},
-                               delimiter=',')  # 确保读取CSV格式，指定分隔符
-        # 重命名列
-        dataset = dataset.rename_column(original_column_name='text', new_column_name='input_text')
-        dataset = dataset.rename_column(original_column_name='category', new_column_name='label')
+        if "banking" in self.args.dataset:
+            print("Using data from banking 77 dataset")
+            dataset = load_dataset('csv',
+                                   data_files={'train': f"{self.data_dir}/train.csv",
+                                               'test': f"{self.data_dir}/test.csv"},
+                                   delimiter=',')  # 确保读取CSV格式，指定分隔符
+            # 重命名列
+            dataset = dataset.rename_column(original_column_name='text', new_column_name='input_text')
+            dataset = dataset.rename_column(original_column_name='category', new_column_name='label')
 
-        #dataset = get_dataset("fewrel", tokenizer=None, args=self.args)
+            #dataset = get_dataset("fewrel", tokenizer=None, args=self.args)
 
-        # 分割训练集和验证集
-        self.train_set = dataset['train']
-        self.test_set = dataset['test']
+            # 分割训练集和验证集
+            self.train_set = dataset['train']
+            self.test_set = dataset['test']
 
-        if self.args.combine:
-            print("Combine data from clinc150")
+        elif "clinc" in self.args.dataset:
+
+            print("Using data from clinc150 dataset")
             # 加载并合并 clinc150 数据集
-            clinc150_train, clinc150_test = self._load_clinc150_data(
+            clinc150_train, clinc150_test = _load_clinc150_data(
                 clinc150_data_path='/home/qiuwenqi/LLM/Datasets/clinc150/data_full.json'
             )
 
-            # 合并数据集
-            self.train_set = self._merge_datasets(self.train_set, clinc150_train)
-            self.test_set = self._merge_datasets(self.test_set, clinc150_test)
+            self.train_set = clinc150_train
+            self.test_set = clinc150_test
 
-    def _load_clinc150_data(self, clinc150_data_path):
-        """加载并格式化 clinc150 数据"""
-        # 读取 JSON 文件
-        with open(clinc150_data_path, 'r') as f:
-            clinc150_data = json.load(f)
+        elif "fewrel" in self.args.dataset:
+            print("Using data from FewRel dataset")
 
-        # 提取 train 和 test 数据
-        clinc150_train = self._convert_clinc150_to_dataframe(clinc150_data.get('train', []))
-        clinc150_test = self._convert_clinc150_to_dataframe(clinc150_data.get('test', []))
-        return clinc150_train, clinc150_test
+            # dataset = get_dataset("fewrel", tokenizer=None, args=self.args)
 
-    def _convert_clinc150_to_dataframe(self, data):
-        """将 clinc150 数据转换为 DataFrame 格式，保留字符串标签"""
-        if not data:
-            return pd.DataFrame(columns=['input_text', 'label'])
-        texts, labels = zip(*data)  # 解压数据为文本和标签
-        return pd.DataFrame({'input_text': texts, 'label': labels})  # 直接保留标签字符串
+            # 加载 fewrel 数据集
+            fewrel_train, fewrel_test = _load_fewrel_data(
+                fewrel_data_path='/home/qiuwenqi/LLM/Datasets/FewRel/FewRel-2021.pkl'
+            )
+            # dataset_train = fewrel_train.rename_column(original_column_name='text', new_column_name='input_text')
+            # dataset_test = fewrel_test.rename_column(original_column_name='labels', new_column_name='label')
 
-    def _merge_datasets(self, dataset, clinc_df):
-        """合并 datasets.Dataset 和 clinc150 DataFrame"""
-        # 转换 clinc_df 为 datasets.Dataset
-        clinc_dataset = Dataset.from_pandas(clinc_df)
+            fewrel_train = fewrel_train.rename_column('text', 'input_text')
+            fewrel_train = fewrel_train.rename_column('labels', 'label')
 
-        # 检查两者的列名是否一致，如果不一致需要统一
-        for column in clinc_dataset.column_names:
-            if column not in dataset.column_names:
-                raise ValueError(f"列 {column} 不在主数据集列中，请检查列名一致性！")
+            fewrel_test = fewrel_test.rename_column('text', 'input_text')
+            fewrel_test = fewrel_test.rename_column('labels', 'label')
 
-        # 合并数据集
-        return concatenate_datasets([dataset, clinc_dataset])
+            self.train_set = fewrel_train
+            self.test_set = fewrel_test
+
+        else:
+            raise ValueError(f"Unsupported dataset: {self.args.dataset}")
 
     def beforeTrain_raw(self, current_task, logger_file=None):
-        # 获取训练前的基线准确率
-        print("Computing previous task accuracies...")
 
-        # 设置当前任务的类别范围
-        if current_task == 0:
-            self.classes = [0, self.args.fg_nc]  # 第一个任务
-        else:
-            self.classes = [self.args.fg_nc + (current_task - 1) * self.task_size,
-                            min(self.args.fg_nc + current_task * self.task_size, self.total_classes)]  # 后续任务
+        # 如果没有提前计算并缓存过类别范围，则进行计算
+        if not hasattr(self, 'classes_cache'):
+            self.classes_cache = {}
+            for task in range(self.args.total_num):  # 假设任务总数为8
+                if task == 0:
+                    start_class = 0  # 第一个任务的类别从0开始
+                    end_class = self.args.fg_nc  # 第一个任务的类别范围为 [0, fg_nc]
+                else:
+                    start_class = self.args.fg_nc + (task - 1) * self.task_size  # 后续任务的起始类别
+                    end_class = min(self.args.fg_nc + task * self.task_size, self.total_classes)  # 后续任务的结束类别
+                self.classes_cache[task] = [start_class, end_class]
 
-        print(f"Now is training task {current_task}")
+        # 从缓存中获取当前任务的类别范围
+        self.classes = self.classes_cache.get(current_task)
 
         if self.classes[1] > self.total_classes:
             self.classes[1] = self.total_classes
@@ -134,43 +132,67 @@ class vitlora:
             self.all_tasks_completed = True
             return
 
+        # 预先筛选训练集和测试集
+        if not hasattr(self, 'task_train_sets'):  # 如果没有预先缓存训练集
+            print("Preprocessing all task's train and test sets...")
+            self.task_train_sets = {}
+            self.task_test_sets = {}
+            self.current_test_set = {}
+
+            for task in range(self.args.total_num):  # 假设任务总数为8
+                # 设置当前任务的类别范围
+                if task == 0:
+                    start_class = 0  # 第一个任务的类别从0开始
+                    end_class = self.args.fg_nc  # 第一个任务的类别范围为 [0, fg_nc]
+                else:
+                    start_class = self.args.fg_nc + (task - 1) * self.task_size  # 后续任务的起始类别
+                    end_class = min(self.args.fg_nc + task * self.task_size, self.total_classes)
+
+                self.task_train_sets[task] = self.preprocessed_train_set.filter(
+                    lambda example: start_class <= example['label'] < end_class
+                )
+
+                self.current_test_set[task] = self.preprocessed_test_set.filter(
+                    lambda example: start_class <= example['label'] < end_class
+                )
+
+                self.task_test_sets[task] = self.preprocessed_test_set.filter(
+                    lambda example: 0 <= example['label'] < end_class
+                )
+
+        print(f"Now is training task {current_task}")
         print(f"train_class is {self.classes[0]} to {self.classes[1]}")
         print(f"test_class is 0 to {self.classes[1]}")
 
-        # 筛选当前任务相关的训练集样本，只包含当前任务的新类别
-        self.train_set = self.preprocessed_train_set.filter(
-            lambda example: self.classes[0] <= example['label'] < self.classes[1])
+        # 获取当前任务的训练集和测试集
+        self.train_set = self.task_train_sets[current_task]
+        self.test_set = self.task_test_sets[current_task]
+        self.current_test = self.current_test_set[current_task]
+
         self.train_dataset = DatasetSplit(self.train_set, list(range(len(self.train_set))))
-        self.train_loader = DataLoader(
-            self.train_dataset, batch_size=self.args.local_bs, shuffle=True, num_workers=0,
-            collate_fn=self.data_collator
-        )
-
-        # 筛选测试集样本，包含所有已学类别（从任务0到当前任务的所有类别）
-        self.test_set = self.preprocessed_test_set.filter(lambda example: 0 <= example['label'] < self.classes[1])
         self.test_dataset = DatasetSplit(self.test_set, list(range(len(self.test_set))))
-        self.test_loader = DataLoader(
-            self.test_dataset, batch_size=self.args.local_bs, shuffle=True, num_workers=0,
-            collate_fn=self.data_collator
-        )
+        self.current_dataset = DatasetSplit(self.current_test, list(range(len(self.current_test))))
 
-        # start_class, end_class = self.classes
-
-        current_test_set = self.preprocessed_test_set.filter(
-            lambda example: self.classes[0] <= example['label'] < self.classes[1])
-        test_dataset = DatasetSplit(current_test_set, list(range(len(current_test_set))))
+        # 创建数据加载器
+        self.train_loader = DataLoader(self.train_dataset, batch_size=self.args.local_bs, shuffle=True, num_workers=0,
+                                       collate_fn=self.data_collator)
+        self.test_loader = DataLoader(self.test_dataset, batch_size=self.args.local_bs, shuffle=True, num_workers=0,
+                                      collate_fn=self.data_collator)
 
         individual_test_loader = DataLoader(
-            test_dataset, batch_size=self.args.local_bs, shuffle=True,
+            self.current_dataset, batch_size=self.args.local_bs, shuffle=True,
             num_workers=0, collate_fn=self.data_collator
         )
         self.list_of_individual_testloader.append(individual_test_loader)
 
+        # 计算前任务的准确率
         if current_task > 0:
+            print("Computing previous task accuracies...")
             previous_acc = []
             for i, test_loader in enumerate(self.list_of_individual_testloader):
                 acc, _ = self.inference(self.model, test_loader)
                 previous_acc.append(acc)
+            print('Task {} previous accuracies: {}'.format(current_task - 1, previous_acc))
             self.previous_task_accuracies.append(previous_acc)
 
             if logger_file:
@@ -180,6 +202,74 @@ class vitlora:
         # 将模型和设备准备好
         self.model.train()
         self.model.to(self.device)
+
+    # def beforeTrain_raw(self, current_task, logger_file=None):
+    #     # 获取训练前的基线准确率
+    #     print("Computing previous task accuracies...")
+    #
+    #     # 设置当前任务的类别范围
+    #     if current_task == 0:
+    #         self.classes = [0, self.args.fg_nc]  # 第一个任务
+    #     else:
+    #         self.classes = [self.args.fg_nc + (current_task - 1) * self.task_size,
+    #                         min(self.args.fg_nc + current_task * self.task_size, self.total_classes)]  # 后续任务
+    #
+    #     print(f"Now is training task {current_task}")
+    #
+    #     if self.classes[1] > self.total_classes:
+    #         self.classes[1] = self.total_classes
+    #
+    #     if self.classes[0] >= self.total_classes:
+    #         print("All tasks completed. Stopping training.")
+    #         self.all_tasks_completed = True
+    #         return
+    #
+    #     print(f"train_class is {self.classes[0]} to {self.classes[1]}")
+    #     print(f"test_class is 0 to {self.classes[1]}")
+    #
+    #     # 筛选当前任务相关的训练集样本，只包含当前任务的新类别
+    #     self.train_set = self.preprocessed_train_set.filter(
+    #         lambda example: self.classes[0] <= example['label'] < self.classes[1])
+    #     self.train_dataset = DatasetSplit(self.train_set, list(range(len(self.train_set))))
+    #     self.train_loader = DataLoader(
+    #         self.train_dataset, batch_size=self.args.local_bs, shuffle=True, num_workers=0,
+    #         collate_fn=self.data_collator
+    #     )
+    #
+    #     # 筛选测试集样本，包含所有已学类别（从任务0到当前任务的所有类别）
+    #     self.test_set = self.preprocessed_test_set.filter(lambda example: 0 <= example['label'] < self.classes[1])
+    #     self.test_dataset = DatasetSplit(self.test_set, list(range(len(self.test_set))))
+    #     self.test_loader = DataLoader(
+    #         self.test_dataset, batch_size=self.args.local_bs, shuffle=True, num_workers=0,
+    #         collate_fn=self.data_collator
+    #     )
+    #
+    #     # start_class, end_class = self.classes
+    #
+    #     current_test_set = self.preprocessed_test_set.filter(
+    #         lambda example: self.classes[0] <= example['label'] < self.classes[1])
+    #     test_dataset = DatasetSplit(current_test_set, list(range(len(current_test_set))))
+    #
+    #     individual_test_loader = DataLoader(
+    #         test_dataset, batch_size=self.args.local_bs, shuffle=True,
+    #         num_workers=0, collate_fn=self.data_collator
+    #     )
+    #     self.list_of_individual_testloader.append(individual_test_loader)
+    #
+    #     if current_task > 0:
+    #         previous_acc = []
+    #         for i, test_loader in enumerate(self.list_of_individual_testloader):
+    #             acc, _ = self.inference(self.model, test_loader)
+    #             previous_acc.append(acc)
+    #         self.previous_task_accuracies.append(previous_acc)
+    #
+    #         if logger_file:
+    #             logger_file.write(f"Task {current_task - 1}'s previous accuracies: {previous_acc}\n")
+    #             logger_file.flush()
+    #
+    #     # 将模型和设备准备好
+    #     self.model.train()
+    #     self.model.to(self.device)
 
 
     def raw_train(self, current_task, old_class=0, tf_writer=None, logger_file=None):
@@ -192,17 +282,18 @@ class vitlora:
         if self.args.is_peft:
             for name, param in self.model.named_parameters():
                 if 'lora' in name.lower() and param.requires_grad:
-                    network_params.append({'params': param, 'lr': self.args.encoders_lr, 'weight_decay': 0.00001})
+                    network_params.append({'params': param, 'lr': self.args.encoders_lr})
         else:
             for param in self.model.parameters():
-                network_params.append({'params': param, 'lr': self.args.encoders_lr, 'weight_decay': 0.00001})
+                network_params.append({'params': param, 'lr': self.args.encoders_lr})
 
         optimizer = torch.optim.Adam(network_params)
         loss_fct = torch.nn.CrossEntropyLoss()
+
+        print(100 * '#')
+        print("Begin Training!")
         # Train
         for epoch in range(self.args.epochs):
-
-            self.model.train()
 
             total_loss = 0
             total_correct = 0
@@ -501,7 +592,7 @@ class vitlora:
             idxs_users = np.random.choice(range(self.args.num_users), m, replace=False)
 
             # load dataset and user groups
-            train_dataset, user_groups = get_dataset(self.args, train_dataset=self.train_set, m=m,
+            train_dataset, user_groups = get_dataset_noniid(self.args, train_dataset=self.train_set, m=m,
                                                      start=self.classes[0], end=self.classes[1],
                                                      task_num=self.task_size)
 
@@ -643,9 +734,12 @@ class vitlora:
 
         # 在每个任务结束后保存每个任务的独立测试集上的准确率
         current_acc = []
+
+        print("Begin Training Current Task...")
         for i, test_loader in enumerate(self.list_of_individual_testloader):
             acc, _ = self.inference(self.model, test_loader)
             current_acc.append(acc)
+        print('Task {} current accuracies: {}'.format(current_task, current_acc))
 
         if logger_file:
             logger_file.write(f"Task {current_task}'s current accuracies: {current_acc}\n")

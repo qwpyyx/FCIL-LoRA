@@ -126,6 +126,7 @@ class LLMWithLoRA(nn.Module):
 
     def forward(self, **inputs):
         outputs = self.model(**inputs)
+        loss = outputs.loss
         logits = outputs.logits
         return logits
 

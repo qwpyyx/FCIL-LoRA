@@ -8,7 +8,6 @@ import warnings
 
 os.environ["WANDB_MODE"] = "disabled"
 warnings.filterwarnings('ignore')
-from tensorboardX import SummaryWriter
 from options import args_parser
 from utils import exp_details
 from VLT import *
@@ -16,7 +15,7 @@ from VITLORA import vitlora
 import random
 import numpy as np
 import deepspeed
-from utils import compute_forgetting_rate
+from utils import compute_forgetting_rate, configure_logging, compute_final_acc
 
 
 def setup_seed(seed):
@@ -61,43 +60,14 @@ if __name__ == '__main__':
 
     args = args_parser()
     args.device = torch.device('cuda:{}'.format(args.gpu) if torch.cuda.is_available() and args.gpu != -1 else 'cpu')
-    task_size = int((args.total_classes - args.fg_nc) / args.task_num)  # number of classes in each incremental task
-    args.type = 'iid' if args.iid == 1 else 'non-iid'
+    if args.is_CL:
+        task_size = int((args.total_classes - args.fg_nc) / args.task_num)
+    else:
+        task_size = 0
 
-    if args.mode == 'centralized':
-        keyname = '/logs-Centralized-1206' + '/{}'.format(args.dataset)
-        if args.is_peft:
-            nam = "lora"
-            args.store_name = '_'.join(
-                [args.dataset, args.model, args.mode, nam, 'epoch-' + str(args.epochs), 'lr-' + str(args.encoders_lr),
-                 'r-' + str(args.r)])
-        else:
-            nam = "full-finetune"
-            args.store_name = '_'.join(
-                [args.dataset, args.model, args.mode, nam, 'epoch-' + str(args.epochs), 'lr-' + str(args.encoders_lr)
-                 ])
-    elif args.mode == "federated":
-        if args.type == 'iid':
-            keyname = '/logs-Federated' + "/iid" + '/{}'.format(args.dataset)
-        else:
-            keyname = '/logs-Federated-1206' + "/non-iid" + '/{}'.format(args.dataset)
-        if args.is_peft:
-            nam = "FCL-lora"
-            if args.type == 'iid':
-                args.store_name = '_'.join(
-                    [args.dataset, args.model, args.mode, args.type, nam,
-                     'epoch-' + str(args.epochs), 'lr-' + str(args.encoders_lr),
-                     'r-' + str(args.r), "iid"])
-            else:
-                args.store_name = '_'.join(
-                    [args.dataset, args.model, args.mode, args.type, nam,
-                     'epoch-' + str(args.epochs), 'lr-' + str(args.encoders_lr),
-                     'r-' + str(args.r), "beta-" + str(args.beta)])
-        else:
-            nam = "FCL-full"
-            args.store_name = '_'.join([args.dataset, args.model, args.mode,
-                                        args.type, nam, 'epoch-' + str(args.epochs), 'lr-' + str(args.encoders_lr),
-                                        "beta-" + str(args.beta)])
+    args.type = 'iid' if args.iid == 1 else 'non-iid'
+    args.total_num = args.task_num + 1
+    keyname = configure_logging(args)
 
     cur_path = os.path.join(os.path.abspath(os.getcwd()), 'PILoRA-cifar')
     prepare_folders(cur_path, keyname)
@@ -126,7 +96,7 @@ if __name__ == '__main__':
         old_class = 0
 
         # 每个任务
-        for i in range(args.task_num + 1):
+        for i in range(args.total_num):
 
             filename = 'log_task_raw{}.txt'.format(i)
             logger_file = open(os.path.join(cur_path + keyname, args.store_name, filename), 'w')
@@ -194,7 +164,7 @@ if __name__ == '__main__':
         centralized_trainer.preprocess_test_set()
 
         # 每个任务的训练过程
-        for i in range(args.task_num + 1):
+        for i in range(args.total_num):
             filename = 'log_task_raw{}.txt'.format(i)
             logger_file = open(os.path.join(cur_path + keyname, args.store_name, filename), 'w')
 
@@ -204,25 +174,7 @@ if __name__ == '__main__':
             centralized_trainer.raw_train(current_task=i, old_class=0, tf_writer=None, logger_file=logger_file)
             centralized_trainer.afterTrain_raw(current_task=i, logger_file=logger_file)
 
-        acc = 0
-        total_weight = 0
-        # 计算 ACC 和 FGT
-        task_num = len(centralized_trainer.task_accuracies)
-        # 加权计算所有任务的准确率
-        for i in range(task_num):
-            # 计算每个任务的类别数
-            if i == 0:
-                task_weight = args.fg_nc
-            else:
-                task_weight = centralized_trainer.task_size
-
-            task_acc = sum(centralized_trainer.task_accuracies[i]) / len(
-                centralized_trainer.task_accuracies[i])  # 当前任务的准确率
-            acc += task_acc * task_weight
-            total_weight += task_weight
-
-        # 最终加权准确率
-        acc /= total_weight
+        acc = compute_final_acc(args, centralized_trainer)
 
         # 计算 FGT
         fgt = compute_forgetting_rate(centralized_trainer.task_accuracies, centralized_trainer.previous_task_accuracies)
