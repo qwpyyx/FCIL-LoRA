@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Python version: 3.6
-
+import os
 import copy
 import torch
 import collections
@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 from sklearn.metrics.pairwise import cosine_similarity
 from collections import Counter
 from scipy.spatial.distance import cdist
-import torch.nn.functional as F
+from transformers import BartModel
 from update import DatasetSplit
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -23,6 +23,29 @@ import json
 import pandas as pd
 from datasets import concatenate_datasets, Dataset
 import pickle
+from torch import nn
+from VLT import LLMWithLoRA, MyBart
+
+def prepare_sequence_finetune(args):
+
+    with open(args.sequence_file.replace('_reduce', ''), 'r') as f:
+        datas = f.readlines()[args.idrandom]
+        data = datas.split()
+
+    args.task_name = data
+
+
+    if args.classifier_lr is None:
+        args.classifier_lr = args.learning_rate
+
+    if 'ewc' in args.baseline:
+        args.lamda = 5000
+
+    output = args.base_dir + "/seq" + str(args.idrandom) + "/seed" + str(args.seed) + "/" + str(
+        args.baseline) + '/' + str(args.dataset_name) + '/' + str(data[args.ft_task]) + "_model/"
+    ckpt = args.base_dir + "/seq" + str(args.idrandom) + "/seed" + str(args.seed) + "/" + str(
+        args.baseline) + '/' + str(args.dataset_name) + '/' + str(data[args.ft_task - 1]) + "_model/"
+
 
 
 def get_trainable_param_names(model):
@@ -79,19 +102,19 @@ def get_trainand_test_dataset(args):
 def get_dataset_noniid(args, train_dataset, m, start, end, task_num):
     # sample training data amongst users
     if args.iid:
-        current_class = random.sample([x for x in range(start, end)], task_num)
-        train_dataset = train_dataset.filter(lambda example: example['label'] in current_class)
+        # current_class = random.sample([x for x in range(start, end)], task_num)
+        # train_dataset = train_dataset.filter(lambda example: example['label'] in current_class)
         user_groups = nlp_iid(train_dataset, m)
     else:
         if args.niid_type == "Q":
-            current_class = random.sample([x for x in range(start, end)], task_num)
-            train_dataset = train_dataset.filter(lambda example: example['label'] in current_class)
+            # current_class = random.sample([x for x in range(start, end)], task_num)
+            # train_dataset = train_dataset.filter(lambda example: example['label'] in current_class)
             user_groups = quantity_based_label_skew(train_dataset, m, alpha=args.alpha)
         else:
             # 从end-start这么多类中随机抽取task num个类
-            current_class = random.sample([x for x in range(start, end)], task_num)
+            # current_class = random.sample([x for x in range(start, end)], task_num)
             # 只保留标签属于 current_class 中的样本。
-            train_dataset = train_dataset.filter(lambda example: example['label'] in current_class)
+            # train_dataset = train_dataset.filter(lambda example: example['label'] in current_class)
             # 根据beta程度进行标签采样
             user_groups = distribution_based_label_skew(train_dataset, m, beta=args.beta)
     # plot_user_groups_distribution(args, train_dataset, user_groups)
@@ -102,7 +125,7 @@ def get_dataset_noniid(args, train_dataset, m, start, end, task_num):
 # 假设 user_groups 是一个字典，其中键是用户ID，值是该用户对应的样本
 def plot_user_groups_distribution(args, dataset, user_groups):
     # 获取所有标签
-    all_labels = np.array(dataset['label'])  # 获取完整数据集的所有标签
+    all_labels = np.array(dataset['labels'])  # 获取完整数据集的所有标签
 
     # 统计每个用户组的标签分布
     user_label_counts = {}
@@ -307,7 +330,6 @@ def compute_weight(centers_list, feature_list, epsilon=1e-6, device='cuda'):
 
     return weight
 
-
 def average_weights(weights_list, model, classes, niid_type, backbone_weight, numclass):
     trainable_params = get_trainable_param_names(model)
 
@@ -315,16 +337,46 @@ def average_weights(weights_list, model, classes, niid_type, backbone_weight, nu
     weight_names = weights_list[0].keys()
 
     for name in weight_names:
-        if name not in trainable_params:
-            if name in model.state_dict():
-                avg_weights[name] = model.state_dict()[name]
+        # 检查是否有 module 前缀
+        if name.startswith("module."):
+            stripped_name = name[len("module."):]  # 去掉 module 前缀
         else:
-            # 确保所有张量在同一设备上
-            aggregated_weight_tensor = torch.stack(
-                [w[name] * backbone_weight[i] for i, w in enumerate(weights_list)]).sum(dim=0)
-            avg_weights[name] = aggregated_weight_tensor
+            stripped_name = name
+
+        try:
+            # 确保与模型的键名对齐
+            if stripped_name not in trainable_params:
+                if stripped_name in model.state_dict():
+                    avg_weights[stripped_name] = model.state_dict()[stripped_name]
+            else:
+                # 聚合权重并确保在相同设备
+                aggregated_weight_tensor = torch.zeros_like(weights_list[0][name])
+                for i, w in enumerate(weights_list):
+                    aggregated_weight_tensor += w[name] * backbone_weight[i]
+                avg_weights[stripped_name] = aggregated_weight_tensor
+
+        except KeyError as e:
+            print(f"Warning: Key {name} ({stripped_name}) not found in weights_list or model state_dict. Skipping.")
 
     return avg_weights
+
+# def average_weights(weights_list, model, classes, niid_type, backbone_weight, numclass):
+#     trainable_params = get_trainable_param_names(model)
+#
+#     avg_weights = collections.OrderedDict()
+#     weight_names = weights_list[0].keys()
+#
+#     for name in weight_names:
+#         if name not in trainable_params:
+#             if name in model.state_dict():
+#                 avg_weights[name] = model.state_dict()[name]
+#         else:
+#             # 确保所有张量在同一设备上
+#             aggregated_weight_tensor = torch.stack(
+#                 [w[name] * backbone_weight[i] for i, w in enumerate(weights_list)]).sum(dim=0)
+#             avg_weights[name] = aggregated_weight_tensor
+#
+#     return avg_weights
 
 
 # def average_weights(weights_list, model, classes, niid_type, backbone_weight, numclass, device='cuda'):
@@ -350,30 +402,72 @@ def average_weights(weights_list, model, classes, niid_type, backbone_weight, nu
 #
 #     return avg_weights
 
+# def global_server(model, global_model, args):
+#     with torch.no_grad():
+#         for name, param in model.named_parameters():
+#             if args.is_peft:
+#                 if 'lora' in name.lower():
+#                     if name in global_model.state_dict():
+#                         if param.size() == global_model.state_dict()[name].size():
+#                             # 确保数据被拷贝到正确的设备
+#                             global_model.state_dict()[name].copy_(param.data.to(global_model.state_dict()[name].device))
+#                         else:
+#                             print(f"Skipping parameter '{name}' due to size mismatch: "
+#                                   f"Model size {param.size()} vs Global model size {global_model.state_dict()[name].size()}")
+#                     else:
+#                         print(f"Skipping parameter '{name}' due to size mismatch: ")
+#             else:
+#                 if name in global_model.state_dict():
+#                     if param.size() == global_model.state_dict()[name].size():
+#                         # 确保数据被拷贝到正确的设备
+#                         global_model.state_dict()[name].copy_(param.data.to(global_model.state_dict()[name].device))
+#                     else:
+#                         print(f"Skipping parameter '{name}' due to size mismatch: "
+#                               f"Model size {param.size()} vs Global model size {global_model.state_dict()[name].size()}")
+#
+#     return global_model
+
+
 def global_server(model, global_model, args):
-    with torch.no_grad():
-        for name, param in model.named_parameters():
-            if args.is_peft:
-                if 'lora' in name.lower():
-                    if name in global_model.state_dict():
-                        if param.size() == global_model.state_dict()[name].size():
-                            # 确保数据被拷贝到正确的设备
-                            global_model.state_dict()[name].copy_(param.data.to(global_model.state_dict()[name].device))
+    # 提取全局模型的 state_dict
+    global_model_state_dict = global_model.state_dict()
+
+    for name, param in model.named_parameters():
+        if args.is_peft:
+            if 'lora' in name.lower():
+                if name in global_model_state_dict:
+                    if param.size() == global_model_state_dict[name].size():
+                        # 避免重复的设备传输
+                        if param.device != global_model_state_dict[name].device:
+                            global_model_state_dict[name].copy_(param.data.to(global_model_state_dict[name].device))
                         else:
-                            print(f"Skipping parameter '{name}' due to size mismatch: "
-                                  f"Model size {param.size()} vs Global model size {global_model.state_dict()[name].size()}")
+                            global_model_state_dict[name].copy_(param.data)
                     else:
-                        print(f"Skipping parameter '{name}' due to size mismatch: ")
-            else:
-                if name in global_model.state_dict():
-                    if param.size() == global_model.state_dict()[name].size():
-                        # 确保数据被拷贝到正确的设备
-                        global_model.state_dict()[name].copy_(param.data.to(global_model.state_dict()[name].device))
+                        print(f"Skipping parameter '{name}' due to size mismatch.")
+                else:
+                    print(f"Skipping parameter '{name}' due to size mismatch.")
+        else:
+            if name in global_model_state_dict:
+                if param.size() == global_model_state_dict[name].size():
+                    # 避免重复的设备传输
+                    if param.device != global_model_state_dict[name].device:
+                        global_model_state_dict[name].copy_(param.data.to(global_model_state_dict[name].device))
                     else:
-                        print(f"Skipping parameter '{name}' due to size mismatch: "
-                              f"Model size {param.size()} vs Global model size {global_model.state_dict()[name].size()}")
+                        global_model_state_dict[name].copy_(param.data)
+                else:
+                    print(f"Skipping parameter '{name}' due to size mismatch.")
 
     return global_model
+
+
+
+
+
+
+
+
+
+
 
 
 # def global_server(model, global_model, args):
@@ -685,14 +779,128 @@ def _load_fewrel_data(fewrel_data_path):
 
         return train_data, test_data
 
+
+def _load_trace_data(trace_data_path):
+    """加载并格式化 FewRel 数据"""
+    with open(trace_data_path, 'rb') as f:
+        datas = pickle.load(f)
+
+        # 获取训练集、验证集和测试集
+        train_dataset, _, test_dataset = datas
+
+        # 处理训练集数据
+        train_texts = []
+        train_labels = []
+        for group_id, group in enumerate(train_dataset):
+            for sample in group:  # 每个group是一个包含420个样本的列表
+                train_texts.append(sample['text'])
+                train_labels.append(sample['semantic_label'])
+
+        # 处理测试集数据
+        test_texts = []
+        test_labels = []
+        for group_id, group in enumerate(test_dataset):
+            for sample in group:  # 每个group是一个包含420个样本的列表
+                test_texts.append(sample['text'])
+                test_labels.append(sample['semantic_label'])
+
+        # 创建训练集和测试集的字典
+        train_data = {
+            'text': train_texts,
+            'labels': train_labels
+        }
+        test_data = {
+            'text': test_texts,
+            'labels': test_labels
+        }
+
+        # 将字典转换为 Dataset 对象
+        train_data = Dataset.from_dict(train_data)
+        test_data = Dataset.from_dict(test_data)
+
+        return train_data, test_data
+
+
+def prepare_sequence_finetune(args):
+    """Prepare a sequence of tasks for class-incremental learning."""
+    with open(args.sequence_file.replace('_reduce', ''), 'r') as f:
+        datas = f.readlines()[args.idrandom]
+        data = datas.split()
+
+    args.task_name = data
+
+    if 'banking77' in args.dataset_name:
+        args.ntasks = 7
+        args.dataset_name = args.sequence_file.split('/')[-1]
+    elif 'clinc150' in args.sequence_file:
+        args.ntasks = 15
+        args.dataset_name = args.sequence_file.split('/')[-1]
+    elif '20news' in args.sequence_file:
+        args.ntasks = 10
+        args.dataset_name = args.sequence_file.split('/')[-1]
+    elif 'fewrel' in args.sequence_file:
+        args.ntasks = 8
+        args.dataset_name = args.sequence_file.split('/')[-1]
+    elif 'tacred' in args.sequence_file:
+        args.ntasks = 8
+        args.dataset_name = args.sequence_file.split('/')[-1]
+    else:
+        raise NotImplementedError('The current dataset is not supported!')
+
+    if args.classifier_lr is None:
+        args.classifier_lr = args.learning_rate
+
+    if 'ewc' in args.baseline:
+        args.lamb = 5000  # Grid search = [500,1000,2000,5000,10000,20000,50000]; best was 5000 for ewc
+
+    output = args.base_dir + "/seq" + str(args.idrandom) + "/seed" + str(args.seed) + "/" + str(
+        args.baseline) + '/' + str(args.dataset_name) + '/' + str(data[args.ft_task]) + "_model/"
+    # 前一个任务的ckpt
+    ckpt = args.base_dir + "/seq" + str(args.idrandom) + "/seed" + str(args.seed) + "/" + str(
+        args.baseline) + '/' + str(args.dataset_name) + '/' + str(data[args.ft_task - 1]) + "_model/"
+
+    if args.ft_task > 0 and 'mtl' not in args.baseline:
+        args.prev_output = args.base_dir + "/seq" + str(args.idrandom) + "/seed" + str(args.seed) + "/" + str(
+            args.baseline) + '/' + str(args.dataset_name) + '/' + str(data[args.ft_task - 1]) + "_model/"
+    else:
+        args.prev_output = ''
+    args.task = args.ft_task
+
+    args.output_dir = output
+
+    args.saved_output_dir = [args.base_dir + "/seq" + str(args.idrandom) + "/seed" + str(args.seed) + "/" + str(
+        args.baseline) + '/' + str(args.dataset_name) + '/' + str(data[t]) + "_model/" for t in range(args.ft_task + 1)]
+
+    if args.task == 0:  # Load the pre-trained model.
+        if 'bart-base' in args.baseline:
+            args.model_name_or_path = '/home/qiuwenqi/LLM/models/bart-base'  # Use the local backup.
+        elif 'bart-large' in args.baseline:
+            args.model_name_or_path = '/home/qiuwenqi/LLM/models/bart-large'
+        else:
+            raise NotImplementedError('Currently, we only support BART as the backbone model.')
+
+    else:
+        args.model_name_or_path = ckpt
+
+    print('saved_output_dir: ', args.saved_output_dir)
+    print('output_dir: ', args.output_dir)
+    print('prev_output: ', args.prev_output)
+    print('args.dataset_name: ', args.dataset_name)
+    print('args.model_name_or_path: ', args.model_name_or_path)
+
+    return args
+
+
+
+
 def configure_logging(args):
     if args.mode == 'centralized':
-        keyname = '/logs-Centralized-1209' + '/{}'.format(args.dataset)
+        keyname = '/output/logs-Centralized-1216' + '/{}'.format(args.dataset)
         if args.is_peft:
             nam = "lora"
             args.store_name = '_'.join(
                 [args.dataset, args.model, args.mode, nam, 'epoch-' + str(args.epochs), 'lr-' + str(args.encoders_lr),
-                 'r-' + str(args.r)])
+                 'r-' + str(args.r), args.baseline])
         else:
             nam = "full-finetune"
             args.store_name = '_'.join(
@@ -700,9 +908,9 @@ def configure_logging(args):
                  ])
     elif args.mode == "federated":
         if args.type == 'iid':
-            keyname = '/logs-Federated' + "/iid" + '/{}'.format(args.dataset)
+            keyname = '/output/logs-Federated' + "/iid" + '/{}'.format(args.dataset)
         else:
-            keyname = '/logs-Federated-1206' + "/non-iid" + '/{}'.format(args.dataset)
+            keyname = '/output/logs-Federated-1216' + "/non-iid" + '/{}'.format(args.dataset)
         if args.is_peft:
             nam = "FCL-lora"
             if args.type == 'iid':
@@ -721,3 +929,155 @@ def configure_logging(args):
                                         args.type, nam, 'epoch-' + str(args.epochs), 'lr-' + str(args.encoders_lr),
                                         "beta-" + str(args.beta)])
     return keyname
+
+
+def update_args(args, current_task):
+    output = args.base_dir + f"/seq_{str(args.idrandom)}_seed{str(args.seed)}"  + "/" + str(
+        args.baseline) + '/' + str(args.dataset) + '/' + 'task_' + str(current_task) + "_model/"
+    # 前一个任务的ckpt路径
+    ckpt = args.base_dir + f"/seq_{str(args.idrandom)}_seed{str(args.seed)}"  + "/" + str(
+        args.baseline) + '/' + str(args.dataset) + '/' + 'task_' + str(current_task-1) + "_model/"
+    # 前一个任务的输出
+    if current_task > 0 and 'mtl' not in args.baseline:
+        args.prev_output = args.base_dir + f"/seq_{str(args.idrandom)}_seed{str(args.seed)}" + "/" + str(
+            args.baseline) + '/' + str(args.dataset) + '/' + 'task_' + str(current_task-1) + "_model/"
+    else:
+        args.prev_output = ''
+
+    args.task = current_task
+
+    args.output_dir = output
+
+    args.saved_output_dir = [args.base_dir + f"/seq_{str(args.idrandom)}_seed{str(args.seed)}"  + "/" + str(
+        args.baseline) + '/' + str(args.dataset) + '/' + 'task_' + str(t) + "_model/" for t in range(current_task + 1)]
+
+    if args.task == 0:  # Load the pre-trained model.
+        if 'bart-base' in args.baseline:
+            args.model_name_or_path = '/home/qiuwenqi/LLM/models/bart-base'  # Use the local backup.
+        elif 'bart-large' in args.baseline:
+            args.model_name_or_path = '/home/qiuwenqi/LLM/models/bart-large'
+        else:
+            raise NotImplementedError('Currently, we only support BART as the backbone model.')
+
+    else:
+        # 上一个训练好的任务的模型存放目录
+        args.model_name_or_path = ckpt
+
+
+def initialize_model(args):
+    # 创建模型
+    if args.task == 0:
+        model = LLMWithLoRA(
+            modelname=args.model_name_or_path,
+            is_peft=args.is_peft,
+            num_classes=args.total_classes,
+            r=args.r,
+            # lora_layer=["query", "value"]
+        )
+    # model = model.to(args.device)
+        data_collator = model.data_collator
+        tokenizer = model.tokenizer
+        if 'bart' in args.baseline:
+            if 'distill' in args.baseline or 'ewc' in args.baseline:
+                teacher = LLMWithLoRA(
+                        modelname=args.model_name_or_path,
+                        is_peft=args.is_peft,
+                        num_classes=args.total_classes,
+                        r=args.r,
+                        # lora_layer=["query", "value"]
+                                    )
+                for param in teacher.parameters():
+                    param.requires_grad = False
+                model = MyBart(model, teacher=teacher, args=args)
+            elif 'classification' in args.baseline:
+                model = MyBart(model, args=args)
+
+    else:
+        ckpt_path = os.path.join(args.model_name_or_path, "mybart_checkpoint.pt")
+        if os.path.exists(ckpt_path):
+            checkpoint = torch.load(ckpt_path, map_location="cpu")  # 加载保存的 checkpoint
+            if 'bart' in args.baseline:
+                if 'distill' in args.baseline or 'ewc' in args.baseline:
+                    base_model = LLMWithLoRA(
+                        modelname="/home/qiuwenqi/LLM/models/bart-base",  # 基础模型路径
+                        is_peft=args.is_peft,
+                        num_classes=args.total_classes,
+                        r=args.r,
+                    )
+                    teacher = LLMWithLoRA(
+                        modelname="/home/qiuwenqi/LLM/models/bart-base",
+                        is_peft=args.is_peft,
+                        num_classes=args.total_classes,
+                        r=args.r,
+                        # lora_layer=["query", "value"]
+                    )
+                    for param in teacher.parameters():
+                        param.requires_grad = False
+                    model = MyBart(base_model, teacher=teacher, args=args)
+                    model.load_state_dict(checkpoint["state_dict"], strict=False)  # 加载权重
+                    print(f"Loaded MyBart model from {ckpt_path}")
+                elif 'classification' in args.baseline:
+                    model = LLMWithLoRA(
+                        modelname="/home/qiuwenqi/LLM/models/bart-base",
+                        is_peft=args.is_peft,
+                        num_classes=args.total_classes,
+                        r=args.r,
+                        # lora_layer=["query", "value"]
+                    )
+                    model = MyBart(model, args=args)
+                    model.load_state_dict(checkpoint["state_dict"], strict=False)  # 加载权重
+                    print(f"Loaded MyBart model from {ckpt_path}")
+        else:
+            raise FileNotFoundError(f"Checkpoint not found at {ckpt_path}")
+
+    if args.is_peft:
+        # 固定所有参数，只更新lora参数
+        for name, param in model.model.named_parameters():
+            param.requires_grad = False
+        for name, param in model.model.named_parameters():
+            if "lora" in name.lower():
+                param.requires_grad = True
+    else:
+        # full fine tune
+        for param in model.model.parameters():
+            param.requires_grad = True
+    # if args.deepspeed:
+    #     model, optimizer, _, _ = deepspeed.initialize(args=args, model=model)
+
+    # 分布式训练
+    # if dist.is_initialized():
+    #     model = DDP(model, device_ids=[args.device])
+    if args.task == 0:
+        return model, data_collator, tokenizer
+    else:
+        return model, None, None
+
+
+def compare_all_model_parameters(model_before, model_after):
+    """
+    比较两个模型的权重，检查所有参数层是否一致。
+
+    Args:
+        model_before (torch.nn.Module): 保存前的模型。
+        model_after (torch.nn.Module): 加载后的模型。
+
+    Returns:
+        bool: 如果所有参数一致返回 True，否则返回 False。
+    """
+    # 获取两个模型的 state_dict
+    state_dict_before = model_before.state_dict()
+    state_dict_after = model_after.state_dict()
+
+    # 遍历所有参数层
+    print("开始检查所有参数层是否一致：")
+    for layer in state_dict_before.keys():
+        param_before = state_dict_before[layer]
+        param_after = state_dict_after[layer]
+
+        # 判断参数是否相等
+        if not torch.equal(param_before, param_after):
+            print(f"❌ 参数 {layer} 不一致")
+            return False  # 发现不一致，立即返回
+
+    print("✅ 所有参数层一致，加载正确")
+    return True

@@ -146,7 +146,7 @@ def distribution_based_label_skew(dataset, num_users, beta=0.1, min_require_size
     :return: 客户端索引字典，每个键代表一个客户端，值是数据集的样本索引
     """
     N = len(dataset)
-    y_train = np.array(dataset['label'])  # 获取所有样本的标签
+    y_train = np.array(dataset['labels'])  # 获取所有样本的标签
     net_dataidx_map = {}
     min_size = 0
 
