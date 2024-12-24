@@ -152,4 +152,5 @@ def fisher_compute(train_dataloader_prune, model, self_fisher, accelerator, args
     if args.mode == 'centralized' and accelerator.is_main_process:
         accelerator.save(self_fisher, fisher_path)
 
+
     return fisher

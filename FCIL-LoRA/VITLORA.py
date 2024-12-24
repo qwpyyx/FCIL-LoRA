@@ -1,23 +1,12 @@
 import shutil
-import os
-from VLT import *
 from utils import *
 from update import *
 from tqdm import tqdm
 from CPN import *
-from transformers import DataCollatorWithPadding
 from datasets import load_dataset
-import json
-import pandas as pd
-from replay import ExperienceReplay
 import math
-import matplotlib.pyplot as plt
-import pickle
-from data import get_dataset
 from utils import _load_clinc150_data, _load_fewrel_data, _load_trace_data, compare_all_model_parameters
-from ewc import EWC
 import torch
-from torch.cuda.amp import autocast, GradScaler
 from transformers import (
     MODEL_MAPPING,
     AdamW,
@@ -34,11 +23,9 @@ MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
 
 class vitlora:
-    def __init__(self, args, model, task_size, device, data_collator):
+    def __init__(self, args, task_size, device):
         self.all_tasks_completed = None
         self.data_dir = '/home/qiuwenqi/LLM/Datasets/banking77'  # 假设数据集文件已经上传到此路径
-        self.model = None
-        self.global_model = None
         self.args = args
         self.numclass = args.fg_nc
         self.task_size = task_size
@@ -46,13 +33,14 @@ class vitlora:
         self.task_accuracies = []
         self.previous_task_accuracies = []
         self.list_of_individual_testloader = []
-        self.data_collator = data_collator
         self.classes = None
         self.old_model = None
         self.list_of_testloader = list()
 
+        # -----------------------
         self._load_datasets()
-
+        update_args(self.args)
+        self.global_model, self.data_collator, self.tokenizer = initialize_model(self.args)
 
     def _load_datasets(self):
         if "banking" in self.args.dataset:
@@ -117,8 +105,6 @@ class vitlora:
         else:
             raise ValueError(f"Unsupported dataset: {self.args.dataset}")
 
-
-
     def save_model(self, accelerator, model):
         """保存 MyBart 模型的状态字典和配置"""
         unwrapped_model = accelerator.unwrap_model(model)  # 解包分布式模型
@@ -144,125 +130,12 @@ class vitlora:
         else:
             model.model.load_state_dict(torch.load(model_dict_path, map_location='cpu'))
 
-    def beforeTrain_raw(self, current_task, logger_file=None, device=None):
 
-        update_args(self.args, current_task)
-        logger.info('==> Building model..')
-        self.model, _, _ = initialize_model(self.args)
-
-        # Test Model
-        # if current_task > 0:
-        #     is_correct = compare_model_parameters(self.last_model, self.model, num_layers_to_check=5)
-        #
-        #     if is_correct:
-        #         print("模型权重加载成功！")
-        #     else:
-        #         print("模型权重加载失败，请检查保存和加载过程。")
-
-        self.global_model = copy.deepcopy(self.model)
-        self.global_model = self.global_model.to(device)
-
-        # 如果没有提前计算并缓存过类别范围，则进行计算
-        if not hasattr(self, 'classes_cache'):
-            self.classes_cache = {}
-            for task in range(self.args.total_num):  # 假设任务总数为8
-                if task == 0:
-                    start_class = 0  # 第一个任务的类别从0开始
-                    end_class = self.args.fg_nc  # 第一个任务的类别范围为 [0, fg_nc]
-                else:
-                    start_class = self.args.fg_nc + (task - 1) * self.task_size  # 后续任务的起始类别
-                    end_class = min(self.args.fg_nc + task * self.task_size, self.total_classes)  # 后续任务的结束类别
-                self.classes_cache[task] = [start_class, end_class]
-
-        # 从缓存中获取当前任务的类别范围
-        self.classes = self.classes_cache.get(current_task)
-
-        if self.classes[1] > self.total_classes:
-            self.classes[1] = self.total_classes
-
-        if self.classes[0] >= self.total_classes:
-            print("All tasks completed. Stopping training.")
-            self.all_tasks_completed = True
-            return
-
-        # 预先筛选训练集和测试集
-        if not hasattr(self, 'task_train_sets'):  # 如果没有预先缓存训练集
-            print("Preprocessing all task's train and test sets...")
-            self.task_train_sets = {}
-            self.task_test_sets = {}
-            self.current_test_set = {}
-            self.task_masks = {}
-
-            for task in range(self.args.total_num):  # 假设任务总数为8
-                # 设置当前任务的类别范围
-                if task == 0:
-                    start_class = 0  # 第一个任务的类别从0开始
-                    end_class = self.args.fg_nc  # 第一个任务的类别范围为 [0, fg_nc]
-                else:
-                    start_class = self.args.fg_nc + (task - 1) * self.task_size  # 后续任务的起始类别
-                    end_class = min(self.args.fg_nc + task * self.task_size, self.total_classes)
-
-                self.task_train_sets[task] = self.preprocessed_train_set.filter(
-                    lambda example: start_class <= example['labels'] < end_class
-                )
-
-                self.current_test_set[task] = self.preprocessed_test_set.filter(
-                    lambda example: start_class <= example['labels'] < end_class
-                )
-
-                self.task_test_sets[task] = self.preprocessed_test_set.filter(
-                    lambda example: 0 <= example['labels'] < end_class
-                )
-
-                # 构建 task_mask
-                task_mask = torch.zeros(300)  # 创建与总类别数相同大小的零张量
-                for idx in range(start_class, end_class):  # 当前任务的标签范围
-                    task_mask[idx] = 1  # 标记属于当前任务的标签
-                self.task_masks[task] = task_mask  # 存储task_mask
-
-        print(f"Now is training task {current_task}")
-        print(f"train_class is {self.classes[0]} to {self.classes[1]}")
-        print(f"test_class is 0 to {self.classes[1]}")
-
-        # 获取当前任务的训练集和测试集
-        self.train_set = self.task_train_sets[current_task]
-        self.test_set = self.task_test_sets[current_task]
-        self.current_test = self.current_test_set[current_task]
+    def raw_train(self, current_task, accelerator=None, dev_loader=None):
+        """集中式增量式训练的实现"""
 
         self.train_loader = DataLoader(self.train_set, batch_size=self.args.local_bs, shuffle=True, num_workers=0,
                                        collate_fn=self.data_collator)
-        self.test_loader = DataLoader(self.test_set, batch_size=self.args.local_bs, shuffle=True, num_workers=0,
-                                      collate_fn=self.data_collator)
-
-        individual_test_loader = DataLoader(
-            self.current_test, batch_size=self.args.local_bs, shuffle=True,
-            num_workers=0, collate_fn=self.data_collator
-        )
-        self.list_of_individual_testloader.append(individual_test_loader)
-
-        # 计算前任务的准确率
-        # if current_task > 0:
-        #     print("Computing previous task accuracies...")
-        #     previous_acc = []
-        #     for i, test_loader in enumerate(self.list_of_individual_testloader):
-        #         acc, _ = self.inference(self.model, test_loader)
-        #         previous_acc.append(acc)
-        #     print('Task {} previous accuracies: {}'.format(current_task - 1, previous_acc))
-        #     self.previous_task_accuracies.append(previous_acc)
-        #
-        #     if logger_file:
-        #         logger_file.write(f"Task {current_task - 1}'s previous accuracies: {previous_acc}\n")
-        #         logger_file.flush()
-
-        # 将模型和设备准备好
-        self.model.train()
-        self.model.to(device)
-
-    def raw_train(self, current_task, old_class=0, tf_writer=None, logger_file=None, accelerator=None,
-                  dev_loader=None):
-        """集中式增量式训练的实现"""
-        # bst_acc = -1
-        # description = "Centralized Training Task={}, Epoch={}, acc={:.4f}% loss={:.2f}, best_acc = {:.2f}%"
 
         if 'ewc' in self.args.baseline:
             if os.path.exists(os.path.join(self.args.prev_output, 'fisher')):
@@ -299,11 +172,11 @@ class vitlora:
 
         network_params = []
         if self.args.is_peft:
-            for name, param in self.model.named_parameters():
+            for name, param in self.global_model.named_parameters():
                 if 'lora' in name.lower() and param.requires_grad:
                     network_params.append({'params': param, 'lr': self.args.encoders_lr})
         else:
-            for param in self.model.parameters():
+            for param in self.global_model.parameters():
                 network_params.append({'params': param, 'lr': self.args.encoders_lr})
 
         optimizer = AdamW(network_params)
@@ -324,7 +197,7 @@ class vitlora:
                 num_training_steps=self.args.max_train_steps,
             )
 
-        model, optimizer, train_loader = accelerator.prepare(self.model, optimizer, self.train_loader)
+        model, optimizer, train_loader = accelerator.prepare(self.global_model, optimizer, self.train_loader)
 
         if dev_loader is not None:
             dev_loader = accelerator.prepare(dev_loader)
@@ -528,9 +401,9 @@ class vitlora:
             if dev_loader is None:
                 # If we don't use dev set for early stopping, we save the model after the training is finished.
                 self.save_model(accelerator, model)
-                self.last_model = model
+                # self.last_model = model
 
-            self.tokenizer.save_pretrained(self.args.output_dir)
+            # self.tokenizer.save_pretrained(self.args.output_dir)
 
             if 'ldbr' in self.args.baseline:
                 torch.save(predictor.state_dict(), os.path.join(self.args.output_dir, 'predictor.pth'))
@@ -698,130 +571,14 @@ class vitlora:
         training_args = {k: v for k, v in self.args.__dict__.items() if k != 'device'}
         dump_json(training_args, self.args.output_dir + '/../training_args.json')
 
-    def preprocess_test_set_FL(self):
-        # 定义预处理函数
-        def preprocess_function(examples):
-            return self.global_model.tokenizer(
-                examples['input_text'],
-                padding='max_length',
-                truncation=True,
-                max_length=128
-            )
-
-        # 对整个测试集进行一次性预处理
-        self.test_set = self.test_set.map(preprocess_function, batched=True)
-        # self.train_set = self.train_set.map(preprocess_function, batched=True)
-        # 备份预处理后的完整测试集
-        self.preprocessed_test_set = self.test_set
-        # self.preprocessed_train_set = self.train_set
-
-    def preprocess_test_set(self, tokenizer):
-        # 定义预处理函数
-        def preprocess_function(examples):
-            return tokenizer(
-                examples['text'],
-                padding='max_length',
-                truncation=True,
-                max_length=128
-            )
-
-        # 对整个测试集进行一次性预处理
-        self.test_set = self.test_set.map(preprocess_function, batched=True)
-        self.test_set.set_format(type='torch', columns=['input_ids', 'attention_mask', 'labels'])
-        self.train_set = self.train_set.map(preprocess_function, batched=True)
-        self.train_set.set_format(type='torch', columns=['input_ids', 'attention_mask', 'labels'])
-
-        # 备份预处理后的完整测试集
-        self.preprocessed_test_set = self.test_set
-        self.preprocessed_train_set = self.train_set
-        self.tokenizer = tokenizer
-
-    def inference(self, model, test_loader):
-        model.eval()
-        test_loss = 0.0
-        correct = 0.0
-        # extracted_features = []
-        # extracted_label = []
-
-        loss_fct = torch.nn.CrossEntropyLoss()  # 分类损失函数
-
-        with torch.no_grad():
-            for step, batch in enumerate(test_loader):
-                inputs = {
-                    'input_ids': batch['input_ids'].to(self.device),
-                    'attention_mask': batch['attention_mask'].to(self.device),
-                    'labels': batch['labels'].to(self.device)
-                }
-
-                # 模型推理
-                # TODO 是forward的问题吗？
-                logits = model(**inputs)
-
-                # 检查 logits 的形状是否正确
-                # print(f"Logits shape: {logits.shape}, Expected number of classes: {self.numclass}")
-
-                # 计算分类交叉熵损失
-                loss = loss_fct(logits, inputs['labels'])
-                test_loss += loss.item()
-
-                # 计算预测结果
-                pred = torch.argmax(logits, dim=1)
-                # print(f"Prediction shape: {pred.shape}, Labels shape: {labels.shape}")
-
-                correct += pred.eq(inputs['labels'].view_as(pred)).sum().item()
-
-        test_loss /= len(test_loader)  # 计算平均损失
-        acc = 100. * correct / len(test_loader.dataset)
-
-        return acc, test_loss
-
-    def save_checkpoint(self, state, is_best):
-        # 拼接路径
-        checkpoint_dir = os.path.join(
-            os.path.abspath(os.path.dirname(os.getcwd())) + 'PILoRA-cifar' + '/checkpoints_epoch',
-            self.args.store_name
-        )
-
-        # 确保目录存在
-        os.makedirs(checkpoint_dir, exist_ok=True)
-
-        # 保存模型状态
-        filename = os.path.join(checkpoint_dir, 'ckpt.pth.tar')
-        torch.save(state, filename)
-
-        # 如果是最佳模型，则复制到新的文件
-        if is_best:
-            best_filename = filename.replace('pth.tar', 'best.pth.tar')
-            shutil.copyfile(filename, best_filename)
-
-    def map_new_class_index(self, labels, class_order):
-        # 创建一个标签到新类索引的映射字典
-        label_mapping = {old_label: new_label for new_label, old_label in enumerate(class_order)}
-
-        # 使用映射字典对标签进行映射
-        mapped_labels = [label_mapping[label] for label in labels]
-
-        return mapped_labels
-
-    def setup_data(self, shuffle, tokenizer):
+    def setup_data(self, shuffle):
         # 获取训练集和测试集的类别标签
         train_targets = self.train_set['labels']
         test_targets = self.test_set['labels']
-
-        # 获取训练集和测试集中的所有唯一标签，确保包含所有类别
-        unique_classes = sorted(set(train_targets + test_targets))
-
+        unique_classes = sorted(set(train_targets) | set(test_targets))
         self.total_classes = len(unique_classes)
+        self.class_order = np.random.permutation(unique_classes).tolist() if shuffle else unique_classes
 
-        # 创建类别的顺序 (直接使用唯一标签，而不是整数)
-        if shuffle:
-            class_order = np.random.permutation(unique_classes).tolist()  # 打乱后的标签顺序
-        else:
-            class_order = unique_classes  # 保持默认的排序顺序
-
-        self.class_order = class_order
-
-        # 创建一个标签到新类索引的映射字典
         label_mapping = {old_label: new_label for new_label, old_label in enumerate(self.class_order)}
 
         # 使用 map() 更新数据集标签
@@ -829,11 +586,11 @@ class vitlora:
         test_set_m = self.test_set.map(lambda example: {'labels': label_mapping[example['labels']]})
 
         def preprocess_function(examples):
-            return tokenizer(
+            return self.tokenizer(
                 examples['text'],
                 padding='max_length',
                 truncation=True,
-                max_length=128
+                max_length=self.args.max_seq_length
             )
 
         # 对整个测试集进行一次性预处理
@@ -841,25 +598,6 @@ class vitlora:
         test_set.set_format(type='torch', columns=['input_ids', 'attention_mask', 'labels'])
         train_set = train_set_m.map(preprocess_function, batched=True)
         train_set.set_format(type='torch', columns=['input_ids', 'attention_mask', 'labels'])
-
-        # 备份预处理后的完整测试集
-        self.preprocessed_test_set = test_set
-        self.preprocessed_train_set = train_set
-        self.tokenizer = tokenizer
-
-
-
-    def beforeTrain(self, current_task, logger_file, device):
-
-        update_args(self.args, current_task)
-        logger.info('==> Building model..')
-        self.model, _, _ = initialize_model(self.args)
-        self.global_model = copy.deepcopy(self.model)
-
-        # Test Model
-        # if current_task > 0:
-        #     is_correct = compare_all_model_parameters(self.last_model, self.model)
-
 
         # 如果没有提前计算并缓存过类别范围，则进行计算
         if not hasattr(self, 'classes_cache'):
@@ -873,107 +611,73 @@ class vitlora:
                     end_class = min(self.args.fg_nc + task * self.task_size, self.total_classes)  # 后续任务的结束类别
                 self.classes_cache[task] = [start_class, end_class]
 
-        # 从缓存中获取当前任务的类别范围
-        self.classes = self.classes_cache.get(current_task)
-
-        if self.classes[1] > self.total_classes:
-            self.classes[1] = self.total_classes
-
-        if self.classes[0] >= self.total_classes:
-            print("All tasks completed. Stopping training.")
-            self.all_tasks_completed = True
-            return
-
-        # print(f"train_class is {self.classes[0]} to {self.classes[1]}")
-        # print(f"test_class is 0 to {self.classes[1]}")
-
         # 预先筛选训练集和测试集
         if not hasattr(self, 'task_train_sets'):  # 如果没有预先缓存训练集
             print("Preprocessing all task's train and test sets...")
             self.task_train_sets = {}
-            self.task_test_sets = {}
+            # self.task_test_sets = {}
             self.current_test_set = {}
             self.task_masks = {}
 
-            for task in range(self.args.total_num):  # 假设任务总数为8
-                # 设置当前任务的类别范围
+            for task in range(self.args.total_num):
                 if task == 0:
-                    start_class = 0  # 第一个任务的类别从0开始
-                    end_class = self.args.fg_nc  # 第一个任务的类别范围为 [0, fg_nc]
+                    start_class = 0
+                    end_class = self.args.fg_nc
                 else:
                     start_class = self.args.fg_nc + (task - 1) * self.task_size  # 后续任务的起始类别
                     end_class = min(self.args.fg_nc + task * self.task_size, self.total_classes)
 
-                self.task_train_sets[task] = self.preprocessed_train_set.filter(
+                self.task_train_sets[task] = train_set.filter(
                     lambda example: start_class <= example['labels'] < end_class
                 )
 
-                self.current_test_set[task] = self.preprocessed_test_set.filter(
+                self.current_test_set[task] = test_set.filter(
                     lambda example: start_class <= example['labels'] < end_class
                 )
 
-                # self.task_test_sets[task] = self.preprocessed_test_set.filter(
-                #     lambda example: 0 <= example['labels'] < end_class
-                # )
+                task_mask = torch.zeros(300)
+                for idx in range(start_class, end_class):
+                    task_mask[idx] = 1
+                self.task_masks[task] = task_mask
 
-                # 构建 task_mask
-                task_mask = torch.zeros(300)  # 创建与总类别数相同大小的零张量
-                for idx in range(start_class, end_class):  # 当前任务的标签范围
-                    task_mask[idx] = 1  # 标记属于当前任务的标签
-                self.task_masks[task] = task_mask  # 存储task_mask
+    def beforeTrain(self, current_task):
+
+        self.classes, self.all_tasks_completed = before_train_utils(current_task,
+                                                                    self.classes_cache,
+                                                                    self.total_classes)
+        if self.all_tasks_completed:
+            return
 
         print(f"Now is training task {current_task}")
         print(f"train_class is {self.classes[0]} to {self.classes[1]}")
-        print(f"test_class is 0 to {self.classes[1]}")
+        print(f"test_class is {self.classes[0]} to {self.classes[1]}")
 
-        # 获取当前任务的训练集和测试集
         self.train_set = self.task_train_sets[current_task]
-        # self.test_set = self.task_test_sets[current_task]
-        self.current_test = self.current_test_set[current_task]
 
-        # self.train_loader = DataLoader(self.train_set, batch_size=self.args.local_bs, shuffle=True, num_workers=0,
-        #                                collate_fn=self.data_collator)
-        # self.test_loader = DataLoader(self.test_set, batch_size=self.args.local_bs, shuffle=True, num_workers=0,
-        #                              collate_fn=self.data_collator)
+        for i in range(self.args.task + 1):
+            self.current_test = self.current_test_set[i]
+            individual_test_loader = DataLoader(
+                self.current_test, batch_size=self.args.local_bs, shuffle=True,
+                num_workers=0, collate_fn=self.data_collator
+            )
+            self.list_of_individual_testloader.append(individual_test_loader)
 
-        individual_test_loader = DataLoader(
-            self.current_test, batch_size=self.args.local_bs, shuffle=True,
-            num_workers=0, collate_fn=self.data_collator
-        )
-        self.list_of_individual_testloader.append(individual_test_loader)
-
-        self.model.train()
-        # self.model.to(device)
-        # self.global_model.to(device)
-
-    def train(self, current_task, logger_file, accelerator, dev_loader):
+    def train(self, current_task, accelerator, dev_loader):
 
         encoder_lr = self.args.encoders_lr
+        # self.global_model = accelerator.prepare(self.global_model)
 
         for epoch in tqdm(range(self.args.epochs)):
-            local_weights = []
             sample_num = []
             m = self.args.client_local
-            idxs_users = np.random.choice(range(self.args.num_users), m, replace=False)
+            idxs_users = np.random.choice(range(self.args.num_users), m, replace=False).tolist()
 
             # load dataset and user groups
             train_dataset, user_groups = get_dataset_noniid(self.args, train_dataset=self.train_set,
                                                             m=m,
                                                             start=self.classes[0], end=self.classes[1],
-                                                            task_num=self.task_size)
-
-            # 使用映射前先对键值对进行排序，确保匹配的一致性
-            sorted_user_keys = sorted(user_groups.keys())
-            sorted_idxs_users = sorted(idxs_users)
-
-            # 映射用户组，确保每个客户端得到正确的数据索引
-            user_groups_mapped = {}
-            for old_key, new_key in zip(sorted_user_keys, sorted_idxs_users):
-                user_groups_mapped[new_key] = user_groups[old_key]
-
-            # 更新用户组
-            user_groups = user_groups_mapped
-
+                                                            task_num=self.task_size, idxs_users=idxs_users)
+            grad_dist = {}
             for idx in idxs_users:
                 # 每个客户端使用其对应的索引
                 local_data_indices = user_groups[idx]
@@ -981,41 +685,18 @@ class vitlora:
                 sample_num.append(len(user_groups[idx]))
                 client_dataset = Subset(train_dataset, local_data_indices)
                 train_loader = DataLoader(client_dataset, batch_size=self.args.local_bs, shuffle=True,
-                                         num_workers=0,
-                                         collate_fn=self.data_collator)
+                                          num_workers=0,
+                                          collate_fn=self.data_collator)
 
-                w, _ = self.update_weights_local(model=copy.deepcopy(self.model), lr=encoder_lr,
-                                                 train_loader=train_loader, accelerator=accelerator, dev_loader=None,
-                                                 idx=idx, current_task=current_task)
-                # local model
-                local_weights.append(w)
+                local_model = copy.deepcopy(self.global_model)
+                local_model, _ = self.update_weights_local(model=copy.deepcopy(local_model), lr=encoder_lr,
+                                                           train_loader=train_loader, accelerator=accelerator,
+                                                           dev_loader=None,
+                                                           idx=idx, current_task=current_task)
 
-            average_weight = [i / sum(sample_num) for i in sample_num]
-
-            # # 使用此函数检查self.global_model是否更新
-            # if compare_model_params(self.model, self.global_model):
-            #     print("global_model and model are identical!")
-            # else:
-            #     print("global_model and model have different parameters.")
-            print("Average_weights for clients...")
-            agg_weights = average_weights(local_weights, self.model, self.classes,
-                                          self.args.niid_type, average_weight, self.numclass)
-
-            # compare_model_and_weights(self.model, agg_weights)
-
-            self.model.load_state_dict(agg_weights)
-
-            # if compare_model_params(self.model, self.global_model):
-            #     print("global_model and model are identical!")
-            # else:
-            #     print("global_model and model have different parameters.")
-            print("Client model update to Global model...")
-            self.global_model = global_server(self.model, self.global_model, self.args)
-
-            # if compare_model_params(self.model, self.global_model):
-            #     print("global_model and model are identical!")
-            # else:
-            #     print("global_model and model have different parameters.")
+                grad, param = self.get_grad(local_model)
+                grad_dist[idx] = grad
+            grad, self.global_model = self.aggregate(grad_dist=grad_dist, cohorts=idxs_users, partition_map=user_groups)
 
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
@@ -1031,13 +712,15 @@ class vitlora:
         predictions = []
         labels = []
 
+        self.global_model = accelerator.prepare(self.global_model)
+
         # Evaluation
         for eval_t in range(current_task + 1):  # Test one all seen classes.
             self.args.task = eval_t
 
             test_loader = self.list_of_individual_testloader[eval_t]
             test_loader = accelerator.prepare(test_loader)
-            self.global_model = accelerator.prepare(self.global_model)
+            # self.global_model = accelerator.prepare(self.global_model)
             micro_f1, macro_f1, acc, test_loss, correct_cnt, sample_cnt, pred_list, label_list, til_acc, \
                 til_correct_cnt, tid_acc, tid_correct_cnt = \
                 self.eval(self.global_model, test_loader, accelerator, self.task_masks[eval_t])
@@ -1152,46 +835,15 @@ class vitlora:
                             for j in range(accs.shape[1]):
                                 file.writelines(str(accs[j][j]) + '\n')
                                 f1_file.writelines(str(f1s[j][j]) + '\n')
-        # Save the training arguments.
+
+        self.global_model = accelerator.unwrap_model(self.global_model)
         training_args = {k: v for k, v in self.args.__dict__.items() if k != 'device'}
         dump_json(training_args, self.args.output_dir + '/../training_args.json')
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-            # test_acc, test_loss = self.inference(self.global_model, self.test_loader)
-
-            # Use decay learning rate
-            # encoder_lr = self.args.encoders_lr * (1 + math.cos(epoch * math.pi / self.args.epochs)) / 2
-
-        #     output_log = 'After {} global rounds, Test acc: {}, inference loss: {}'.format(
-        #         epoch + 1, test_acc, test_loss)
-        #     logger_file.write(output_log + '\n')
-        #     logger_file.flush()
-        #
-        #     is_best = test_acc > bst_acc
-        #     bst_acc = max(bst_acc, test_acc)
-        #
-        # print(description.format(test_acc, test_loss, bst_acc))
-        #
-        # if logger_file:
-        #     output_log = f'Task {current_task} - Test acc: {test_acc:.4f}, Test loss: {test_loss:.4f}'
-        #     logger_file.write(output_log + '\n')
-        #     logger_file.flush()
-
     def update_weights_local(self, model, lr, train_loader, accelerator, dev_loader, idx, current_task):
-
-        logger.info(f"Client {idx} Task {current_task}: 开始训练")
+        model.train()
+        if accelerator.is_main_process:
+            logger.info(f"Client {idx} Task {current_task}: 开始训练")
 
         client_dir = os.path.join(
             self.args.base_dir,
@@ -1216,7 +868,6 @@ class vitlora:
         # 构建当前任务的输出目录
         current_output_dir = os.path.join(client_dir, f"task_{current_task}_model")
         os.makedirs(current_output_dir, exist_ok=True)
-
 
         # EWC 相关
         if 'ewc' in self.args.baseline:
@@ -1303,7 +954,6 @@ class vitlora:
                     if isinstance(value, torch.Tensor):
                         self_fisher[key] = value.to(model_device)
 
-
         if dev_loader is not None:
             dev_loader = accelerator.prepare(dev_loader)
 
@@ -1343,9 +993,9 @@ class vitlora:
                 for saved_output_dir in self.args.saved_output_dir[:-2]:  # We need -2 so that we can load model.
                     if os.path.isdir(saved_output_dir):
                         shutil.rmtree(saved_output_dir)
-
-        print(100 * '#')
-        print("Begin Local Training!")
+        if accelerator.is_main_process:
+            print(100 * '#')
+            print("Begin Local Training!")
 
         # Local epoch
         for iter in range(self.args.local_ep):
@@ -1421,7 +1071,6 @@ class vitlora:
                 progress_bar = tqdm(range(len(train_loader)), disable=not accelerator.is_local_main_process)
 
                 for batch_idx, inputs in enumerate(train_loader):
-                    model.train()
 
                     if 'ewc' in self.args.baseline:
                         if 'bart_classification' in self.args.baseline:
@@ -1464,8 +1113,8 @@ class vitlora:
                     if lr_scheduler is not None:
                         lr_scheduler.step()
                     optimizer.zero_grad()
-                    current_lr = optimizer.param_groups[0]['lr']
-                    print(current_lr)
+                    # current_lr = optimizer.param_groups[0]['lr']
+                    # print(current_lr)
                     progress_bar.update(1)
                     progress_bar.set_description(
                         'Train Iter (Epoch=%3d,loss=%5.3f)' % (iter, loss.item()))
@@ -1475,10 +1124,11 @@ class vitlora:
 
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
-            # if dev_loader is None:
-            #     # If we don't use dev set for early stopping, we save the model after the training is finished.
-            #     self.save_model(accelerator, model)
-            #     self.last_model = model
+            if dev_loader is None:
+                # If we don't use dev set for early stopping, we save the model after the training is finished.
+                # self.save_model(accelerator, model)
+                #     self.last_model = model
+                pass
 
             # self.tokenizer.save_pretrained(self.args.output_dir)
             if 'ldbr' in self.args.baseline:
@@ -1522,96 +1172,17 @@ class vitlora:
                     outputs = model(**inputs)
                     logits = outputs.logits.cpu()
                     buffer.add_data(inputs['input_ids'],
-                                        labels=inputs['labels'],
-                                        logits=logits,
-                                        attention_mask=inputs['attention_mask'])
+                                    labels=inputs['labels'],
+                                    logits=logits,
+                                    attention_mask=inputs['attention_mask'])
             print(f'The buffer now contains {buffer.num_seen_examples} examples!')
             buffer_save_path = os.path.join(current_output_dir, 'buffer.pth')
             torch.save(buffer, buffer_save_path)
 
-        return model.state_dict(), None
-
-    def afterTrain(self, current_task, logger_file):
-        # 更新类别数量
-        # self.numclass = min((current_task + 1) * self.task_size, self.total_classes)
-
-        # if self.args.is_replay:
-        #     print(f"Adding task {current_task}'s data to experience replay...")
-        #     # 将当前任务数据保存到经验回放缓存中
-        #     self.experience_replay.add(self.train_dataset)
-
-        # 在每个任务结束后保存每个任务的独立测试集上的准确率
-        current_acc = []
-        for i, test_loader in enumerate(self.list_of_individual_testloader):
-            acc, _ = self.inference(self.global_model, test_loader)
-            current_acc.append(acc)
-
-        if logger_file:
-            logger_file.write(f"Task {current_task}'s current accuracies: {current_acc}\n")
-            logger_file.flush()
-
-        self.task_accuracies.append(current_acc)
-        # # 创建保存模型的目录
-        # path = os.path.join(self.args.save_path, self.file_name)
-        # if not os.path.isdir(path):
-        #     os.makedirs(path)
-
-        if self.numclass >= self.total_classes:
-            print("Reached the maximum number of classes. Training complete.")
-            return
-
-        # 保存当前的全局模型
-        # filename = path + '%d_model.pkl' % (self.numclass - self.task_size)
-        # torch.save(self.global_model.state_dict(), filename)
-
-        # 更新旧模型为最新的训练后模型
-        # self.old_model = copy.deepcopy(self.global_model)
-        # self.old_model.load_state_dict(torch.load(filename, map_location=self.device))
-        # self.old_model.to(self.device)
-        # self.old_model.eval()
-        print(100 * '#')
-        print(" had done {} tasks".format(current_task))
-
-    def afterTrain_raw(self, current_task, logger_file=None):
-
-        if self.args.is_replay:
-            print(f"Adding task {current_task}'s data to experience replay...")
-            # 将当前任务数据保存到经验回放缓存中
-            self.experience_replay.add(self.train_dataset)
-
-        start_class, end_class = self.classes
-
-        # 在每个任务结束后保存每个任务的独立测试集上的准确率
-        current_acc = []
-
-        print("Begin Training Current Task...")
-        for i, test_loader in enumerate(self.list_of_individual_testloader):
-            acc, _ = self.inference(self.model, test_loader)
-            current_acc.append(acc)
-        print('Task {} current accuracies: {}'.format(current_task, current_acc))
-
-        if logger_file:
-            logger_file.write(f"Task {current_task}'s current accuracies: {current_acc}\n")
-            logger_file.flush()
-
-        self.task_accuracies.append(current_acc)
-
-        # 创建保存模型的目录
-        # path = os.path.join(self.args.save_path, self.file_name)
-        # if not os.path.isdir(path):
-        #     os.makedirs(path)
-
-        # 检查是否完成所有任务
-        if end_class >= self.total_classes:
-            print("Reached the maximum number of classes. Training complete.")
-            return
-
-        # 保存当前的模型
-        # filename = os.path.join(path, f'{end_class - self.task_size}_model.pkl')
-        # torch.save(self.model.state_dict(), filename)
-
-        print(100 * '#')
-        print(f"Completed training task {current_task}")
+        model = accelerator.unwrap_model(model)
+        model.cpu()
+        return model, None
+        # return model.state_dict(), None
 
     def eval(self, model, dataloader, accelerator, task_label_mask=None):
         model.eval()
@@ -1673,3 +1244,94 @@ class vitlora:
 
         return micro_f1, macro_f1, accuracy, total_loss / total_num, correct_num, len(prediction_list), \
             prediction_list, label_list, til_accuracy, til_correct_num, tid_pred_accuracy, tid_pred_correct_num
+
+    def get_grad(self, model):
+
+        grad = torch.tensor([]).cuda()  # 在GPU上初始化grad
+        param = torch.tensor([]).cuda()  # 在GPU上初始化param
+
+        model_state_dict = model.state_dict()
+        global_state_dict = self.global_model.state_dict()
+
+        if self.args.is_peft == 1:
+            for layer in global_state_dict:
+                if "num_batches_tracked" in layer:
+                    continue
+                if 'lora' in layer:
+                    try:
+                        param_now = model_state_dict[layer].detach().cuda()  # 保证在GPU上
+                        param_last = global_state_dict[layer].detach().cuda()  # 保证在GPU上
+                    except KeyError:
+                        raise KeyError(f"无法在 model 和 global_model 的 state_dict 中找到键: '{layer}'")
+
+                    param_g = param_last - param_now  # 计算梯度
+                    param = torch.cat((param, param_now.view(-1)))  # 拼接参数
+                    grad = torch.cat((grad, param_g.view(-1)))  # 拼接梯度
+        else:
+            for layer in global_state_dict:
+                if "num_batches_tracked" in layer:
+                    continue
+                try:
+                    param_now = model_state_dict[layer].detach().cuda()  # 保证在GPU上
+                    param_last = global_state_dict[layer].detach().cuda()  # 保证在GPU上
+                except KeyError:
+                    raise KeyError(f"无法在 model 和 global_model 的 state_dict 中找到键: '{layer}'")
+
+                param_g = param_last - param_now  # 计算梯度
+                param = torch.cat((param, param_now.view(-1)))  # 拼接参数
+                grad = torch.cat((grad, param_g.view(-1)))  # 拼接梯度
+
+        # 确保在条件未满足时也有默认值
+        grad_cpu = grad.cpu() if grad.numel() > 0 else grad  # 如果 grad 非空，移到CPU
+        param_cpu = param.cpu() if param.numel() > 0 else param  # 如果 param 非空，移到CPU
+
+        # 显式删除GPU上的张量，释放内存
+        del grad
+        del param
+
+        # 调用空缓存
+        torch.cuda.empty_cache()
+
+        return grad_cpu, param_cpu
+
+    def aggregate(self, grad_dist: dict, cohorts: list, partition_map: dict):
+        print("Begin aggregate...")
+        model_gra = torch.zeros_like(grad_dist[cohorts[0]])
+        data_sum = 0
+        for client in cohorts:
+            data_sum += len(partition_map[client])
+        for client in cohorts:
+            w = len(partition_map[client]) / data_sum
+            model_gra += (w * grad_dist[client])
+        global_model = self.combine(grad=model_gra)
+        return model_gra, global_model
+
+    def combine(self, grad, gobal_model=None):
+        if gobal_model is None:
+            gobal_model = self.global_model
+        grad = grad.cuda()
+        current_index = 0
+        model = copy.deepcopy(gobal_model)
+        current_state_dict = model.state_dict()
+
+        if self.args.is_peft == 1:
+            for name, param in current_state_dict.items():
+                if 'lora' in name:
+                    param = param.cuda()
+                    numel = param.data.numel()
+                    size = param.data.size()
+                    current_state_dict[name] = \
+                        torch.subtract(param.data.detach(), grad[current_index:current_index + numel].view(size))
+                    current_index += numel
+        else:
+            for name, param in current_state_dict.items():
+                param = param.cuda()
+                numel = param.data.numel()
+                size = param.data.size()
+                current_state_dict[name] = \
+                    torch.subtract(param.data.detach(), grad[current_index:current_index + numel].view(size))
+                current_index += numel
+
+        model.load_state_dict(current_state_dict)
+
+        return model

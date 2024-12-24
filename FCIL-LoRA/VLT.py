@@ -79,11 +79,8 @@ class LLMWithLoRA(PreTrainedModel):
         self.return_feature = return_feature
         self.is_peft = is_peft
         if is_peft:
-            # 使用LoRA配置参数
             self.lora_layer = lora_layer if lora_layer else ["q_proj", "v_proj"]
             lora_alpha = 2 * r
-            # PEFT的LoRA配置
-            # TODO CAUSAL_LM是不是一种选择？
             lora_config = LoraConfig(task_type=TaskType.SEQ_CLS,
                                      inference_mode=False, r=r,
                                      lora_alpha=lora_alpha,
@@ -94,22 +91,11 @@ class LLMWithLoRA(PreTrainedModel):
 
             self.model = get_peft_model(self.model, lora_config)
 
-
-
-        # for name, param in self.model.named_parameters():
-        #     if param.requires_grad == True:
-        #         print(name)
-
         self.model.resize_token_embeddings(len(self.tokenizer))
-
         self.masked_label = None
 
 
-    # def forward(self, **inputs):
-    #     outputs = self.model(**inputs)
-    #     loss = outputs.loss
-    #     logits = outputs.logits
-    #     return logits
+
 
     def forward(
             self,

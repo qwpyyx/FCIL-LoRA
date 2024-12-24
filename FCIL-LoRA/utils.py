@@ -25,15 +25,14 @@ from datasets import concatenate_datasets, Dataset
 import pickle
 from torch import nn
 from VLT import LLMWithLoRA, MyBart
+from collections import OrderedDict
 
 def prepare_sequence_finetune(args):
-
     with open(args.sequence_file.replace('_reduce', ''), 'r') as f:
         datas = f.readlines()[args.idrandom]
         data = datas.split()
 
     args.task_name = data
-
 
     if args.classifier_lr is None:
         args.classifier_lr = args.learning_rate
@@ -45,7 +44,6 @@ def prepare_sequence_finetune(args):
         args.baseline) + '/' + str(args.dataset_name) + '/' + str(data[args.ft_task]) + "_model/"
     ckpt = args.base_dir + "/seq" + str(args.idrandom) + "/seed" + str(args.seed) + "/" + str(
         args.baseline) + '/' + str(args.dataset_name) + '/' + str(data[args.ft_task - 1]) + "_model/"
-
 
 
 def get_trainable_param_names(model):
@@ -99,7 +97,7 @@ def get_trainand_test_dataset(args):
     return train_dataset, test_dataset
 
 
-def get_dataset_noniid(args, train_dataset, m, start, end, task_num):
+def get_dataset_noniid(args, train_dataset, m, start, end, task_num, idxs_users):
     # sample training data amongst users
     if args.iid:
         # current_class = random.sample([x for x in range(start, end)], task_num)
@@ -118,6 +116,18 @@ def get_dataset_noniid(args, train_dataset, m, start, end, task_num):
             # 根据beta程度进行标签采样
             user_groups = distribution_based_label_skew(train_dataset, m, beta=args.beta)
     # plot_user_groups_distribution(args, train_dataset, user_groups)
+
+    # 使用映射前先对键值对进行排序，确保匹配的一致性
+    sorted_user_keys = sorted(user_groups.keys())
+    sorted_idxs_users = sorted(idxs_users)
+
+    # 映射用户组，确保每个客户端得到正确的数据索引
+    user_groups_mapped = {}
+    for old_key, new_key in zip(sorted_user_keys, sorted_idxs_users):
+        user_groups_mapped[new_key] = user_groups[old_key]
+
+    # 更新用户组
+    user_groups = user_groups_mapped
 
     return train_dataset, user_groups
 
@@ -330,6 +340,7 @@ def compute_weight(centers_list, feature_list, epsilon=1e-6, device='cuda'):
 
     return weight
 
+
 def average_weights(weights_list, model, classes, niid_type, backbone_weight, numclass):
     trainable_params = get_trainable_param_names(model)
 
@@ -359,6 +370,7 @@ def average_weights(weights_list, model, classes, niid_type, backbone_weight, nu
             print(f"Warning: Key {name} ({stripped_name}) not found in weights_list or model state_dict. Skipping.")
 
     return avg_weights
+
 
 # def average_weights(weights_list, model, classes, niid_type, backbone_weight, numclass):
 #     trainable_params = get_trainable_param_names(model)
@@ -458,16 +470,6 @@ def global_server(model, global_model, args):
                     print(f"Skipping parameter '{name}' due to size mismatch.")
 
     return global_model
-
-
-
-
-
-
-
-
-
-
 
 
 # def global_server(model, global_model, args):
@@ -685,6 +687,7 @@ def compute_forgetting_rate(task_accuracies, previous_task_accuracies):
     total_fgt = np.mean(forgetting_rates)
     return total_fgt
 
+
 def compute_final_acc(args, centralized_trainer):
     acc = 0
     total_weight = 0
@@ -706,6 +709,7 @@ def compute_final_acc(args, centralized_trainer):
     # 最终加权准确率
     acc /= total_weight
     return acc
+
 
 def _load_clinc150_data(clinc150_data_path):
     """加载并格式化 clinc150 数据"""
@@ -891,8 +895,6 @@ def prepare_sequence_finetune(args):
     return args
 
 
-
-
 def configure_logging(args):
     if args.mode == 'centralized':
         keyname = '/output/logs-Centralized-1216' + '/{}'.format(args.dataset)
@@ -931,24 +933,23 @@ def configure_logging(args):
     return keyname
 
 
-def update_args(args, current_task):
-    output = args.base_dir + f"/seq_{str(args.idrandom)}_seed{str(args.seed)}"  + "/" + str(
+def update_args(args):
+    current_task = args.task
+    output = args.base_dir + f"/seq_{str(args.idrandom)}_seed{str(args.seed)}" + "/" + str(
         args.baseline) + '/' + str(args.dataset) + '/' + 'task_' + str(current_task) + "_model/"
     # 前一个任务的ckpt路径
-    ckpt = args.base_dir + f"/seq_{str(args.idrandom)}_seed{str(args.seed)}"  + "/" + str(
-        args.baseline) + '/' + str(args.dataset) + '/' + 'task_' + str(current_task-1) + "_model/"
+    ckpt = args.base_dir + f"/seq_{str(args.idrandom)}_seed{str(args.seed)}" + "/" + str(
+        args.baseline) + '/' + str(args.dataset) + '/' + 'task_' + str(current_task - 1) + "_model/"
     # 前一个任务的输出
     if current_task > 0 and 'mtl' not in args.baseline:
         args.prev_output = args.base_dir + f"/seq_{str(args.idrandom)}_seed{str(args.seed)}" + "/" + str(
-            args.baseline) + '/' + str(args.dataset) + '/' + 'task_' + str(current_task-1) + "_model/"
+            args.baseline) + '/' + str(args.dataset) + '/' + 'task_' + str(current_task - 1) + "_model/"
     else:
         args.prev_output = ''
 
-    args.task = current_task
-
     args.output_dir = output
 
-    args.saved_output_dir = [args.base_dir + f"/seq_{str(args.idrandom)}_seed{str(args.seed)}"  + "/" + str(
+    args.saved_output_dir = [args.base_dir + f"/seq_{str(args.idrandom)}_seed{str(args.seed)}" + "/" + str(
         args.baseline) + '/' + str(args.dataset) + '/' + 'task_' + str(t) + "_model/" for t in range(current_task + 1)]
 
     if args.task == 0:  # Load the pre-trained model.
@@ -960,7 +961,6 @@ def update_args(args, current_task):
             raise NotImplementedError('Currently, we only support BART as the backbone model.')
 
     else:
-        # 上一个训练好的任务的模型存放目录
         args.model_name_or_path = ckpt
 
 
@@ -974,18 +974,18 @@ def initialize_model(args):
             r=args.r,
             # lora_layer=["query", "value"]
         )
-    # model = model.to(args.device)
+        # model = model.to(args.device)
         data_collator = model.data_collator
         tokenizer = model.tokenizer
         if 'bart' in args.baseline:
             if 'distill' in args.baseline or 'ewc' in args.baseline:
                 teacher = LLMWithLoRA(
-                        modelname=args.model_name_or_path,
-                        is_peft=args.is_peft,
-                        num_classes=args.total_classes,
-                        r=args.r,
-                        # lora_layer=["query", "value"]
-                                    )
+                    modelname=args.model_name_or_path,
+                    is_peft=args.is_peft,
+                    num_classes=args.total_classes,
+                    r=args.r,
+                    # lora_layer=["query", "value"]
+                )
                 for param in teacher.parameters():
                     param.requires_grad = False
                 model = MyBart(model, teacher=teacher, args=args)
@@ -1004,6 +1004,8 @@ def initialize_model(args):
                         num_classes=args.total_classes,
                         r=args.r,
                     )
+                    data_collator = base_model.data_collator
+                    tokenizer = base_model.tokenizer
                     teacher = LLMWithLoRA(
                         modelname="/home/qiuwenqi/LLM/models/bart-base",
                         is_peft=args.is_peft,
@@ -1024,6 +1026,8 @@ def initialize_model(args):
                         r=args.r,
                         # lora_layer=["query", "value"]
                     )
+                    data_collator = model.data_collator
+                    tokenizer = model.tokenizer
                     model = MyBart(model, args=args)
                     model.load_state_dict(checkpoint["state_dict"], strict=False)  # 加载权重
                     print(f"Loaded MyBart model from {ckpt_path}")
@@ -1041,16 +1045,10 @@ def initialize_model(args):
         # full fine tune
         for param in model.model.parameters():
             param.requires_grad = True
-    # if args.deepspeed:
-    #     model, optimizer, _, _ = deepspeed.initialize(args=args, model=model)
 
-    # 分布式训练
-    # if dist.is_initialized():
-    #     model = DDP(model, device_ids=[args.device])
-    if args.task == 0:
-        return model, data_collator, tokenizer
-    else:
-        return model, None, None
+
+    return model, data_collator, tokenizer
+
 
 
 def compare_all_model_parameters(model_before, model_after):
@@ -1081,3 +1079,44 @@ def compare_all_model_parameters(model_before, model_after):
 
     print("✅ 所有参数层一致，加载正确")
     return True
+
+
+def before_train_utils(current_task, classes_cache, total_classes):
+    classes = classes_cache.get(current_task)
+
+    # Update class range
+    if classes[1] > total_classes:
+        classes[1] = total_classes
+
+    if classes[0] >= total_classes:
+        print("All tasks completed. Stopping training.")
+        return classes, True  # Return classes and a flag indicating all tasks are completed
+
+    return classes, False  # Return classes and False if tasks are not completed
+
+
+def strip_module_prefix(state_dict):
+    """
+    移除所有键名中的 'module.' 前缀（如果存在），并保持为 OrderedDict。
+    """
+    new_state_dict = OrderedDict()
+    for k, v in state_dict.items():
+        if k.startswith('module.'):
+            new_key = k[len('module.'):]
+        else:
+            new_key = k
+        new_state_dict[new_key] = v
+    return new_state_dict
+
+def add_module_prefix(state_dict):
+    """
+    为所有键名添加 'module.' 前缀（如果尚未添加），并保持为 OrderedDict。
+    """
+    new_state_dict = OrderedDict()
+    for k, v in state_dict.items():
+        if not k.startswith('module.'):
+            new_key = 'module.' + k
+        else:
+            new_key = k
+        new_state_dict[new_key] = v
+    return new_state_dict

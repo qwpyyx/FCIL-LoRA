@@ -18,9 +18,9 @@ def args_parser():
     # federated arguments (Notation for the arguments followed from paper)
     parser.add_argument('--epochs', type=int, default=10,
                         help="number of rounds of training")
-    parser.add_argument('--num_users', type=int, default=30,
+    parser.add_argument('--num_users', type=int, default=20,
                         help="number of users: K")
-    parser.add_argument('--client_local', type=int, default=10,
+    parser.add_argument('--client_local', type=int, default=5,
                         help='the number of clients in a local training: M')
     parser.add_argument('--local_ep', type=int, default=1,
                         help="the number of local epochs: E")
@@ -34,9 +34,9 @@ def args_parser():
                         help='SGD momentum (default: 0.5)')
     parser.add_argument('--r', type=int, default=32,
                         help="rank of lora")
-    parser.add_argument('--mix_precision', type=str, default='no')
+    # parser.add_argument('--mix_precision', type=str, default='no')
     # model arguments
-    parser.add_argument('--model', type=str, default='mlp', help='model name')
+    parser.add_argument('--model', type=str, default='mlp', help='bart_classification_bart-base')
     parser.add_argument('--weight_decay', type=float, default=0.01)
     parser.add_argument('--log_dir', type=str, default=None)
     parser.add_argument('--baseline', type=str, default='vanilla',
@@ -92,7 +92,7 @@ def args_parser():
                         to a specific GPU ID. Default set to use CPU.")
     parser.add_argument('--optimizer', type=str, default='sgd', help="type \
                         of optimizer")
-    parser.add_argument('--iid', type=int, default=1,
+    parser.add_argument('--iid', type=int, default=0,
                         help='Default set to IID. Set to 0 for non-IID.')
     parser.add_argument('--stopping_rounds', type=int, default=10,
                         help='rounds of early stopping')
@@ -105,7 +105,7 @@ def args_parser():
     parser.add_argument('--total_classes', default=100, type=int, help='total classes')
     parser.add_argument('--fg_nc', default=7, type=int, help='the number of classes in first task')
     parser.add_argument('--save_path', default='model_saved_check/', type=str, help='save files directory')
-    parser.add_argument('--niid_type', default='Q', type=str, help='Quality or Distributed(non-iid)')
+    parser.add_argument('--niid_type', default='D', type=str, help='Quality or Distributed(non-iid)')
     parser.add_argument('--alpha', default=6, type=int, help='quantity skew')
     parser.add_argument('--beta', default=0.5, type=float, help='distribution skew')
     parser.add_argument('--mode', type=str, default='federated', choices=['federated', 'centralized'],
@@ -117,7 +117,7 @@ def args_parser():
                         help="Whether to use peft such as lora to fine tune model")
     parser.add_argument('--deepspeed', type=str, default=None, help="DeepSpeed configuration file")
     parser.add_argument('--output_dir', type=str, default=None)
-
+    parser.add_argument('--task', type=int, default=None)
     #Replay
     parser.add_argument('--is_replay', type=int, default=0,
                         help="Whether to use replay to fine tune model")
